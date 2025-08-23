@@ -1,6 +1,6 @@
 # Visua
 
-**Visua** is a cross-platform image viewer built in Rust with a focus on speed, clarity, and scientific usability.
+**Visua** is a cross-platform image viewer built in Rust with a focus on speed and clarity.
 
 ## ✨ Features
 - Dual-pane comparison mode (A/B) with synchronized zoom & pan
