@@ -1,0 +1,20 @@
+[build-dependencies]
+embed-resource = "2.5"
+winres = "0.1"
+
+[package]
+build = "build.rs"
+name = "visua"
+version = "1.0.0"
+authors = ["AdrienLor"]
+edition = "2024"
+
+[dependencies]
+eframe = { version = "0.29", features = ["wgpu"] }
+egui   = "0.29"
+image  = { version = "0.25", default-features = false, features = ["png","jpeg","gif","ico","bmp","tga","pnm","hdr","webp","tiff"] }
+tiff   = "0.9"
+rfd    = "0.14"
+bytemuck = { version = "1.15", features = ["derive"] }
+pdfium-render = { version = "0.8.35", features = ["image_latest", "thread_safe"] }
+
