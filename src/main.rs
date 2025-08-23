@@ -1531,6 +1531,10 @@ struct App {
     compare_vertical_offset : f32, //espace entre les images (vert) avec cisaillement de A par rapport à B
 
     pub max_tex_side_device: u32,
+
+    //status message
+    status_message: Option<(String, egui::Color32)>,  // texte + couleur
+    status_timer: f32,                                // temps restant (en secondes)
 }
 
 impl Default for App {
@@ -1622,6 +1626,9 @@ impl Default for App {
             compare_vertical_offset : 0.0,
 
             max_tex_side_device: MAX_TEX_SIDE_FALLBACK,
+
+            status_message: None,
+            status_timer: 0.0,
         }
     }
 }
@@ -1646,50 +1653,70 @@ impl App {
         }
 
         self.subfolders.sort();
+
+        if !self.subfolders.contains(&self.bin_folder_name) {
+            self.bin_folder_name.clear();
+        }
+
+    }
+
+    fn set_status_message(&mut self, msg: &str, color: egui::Color32, duration: f32) {
+        self.status_message = Some((msg.to_string(), color));
+        self.status_timer = duration; // ex: 3.0 secondes
     }
 
     /// Déplace l'image courante (A) dans <dossier>/Visua_bin/ en générant un nom unique si besoin,
     /// puis charge automatiquement la suivante (sinon vide l'affichage).
     fn move_current_to_bin(&mut self, ctx: &egui::Context) -> Result<(), String> {
 
-        let p = self.path_a.clone().ok_or("Aucune image chargée.")?;
-        let dir = p.parent().ok_or("Chemin sans parent.")?;
-        let bin = dir.join(self.bin_folder_name.as_str());
-        fs::create_dir_all(&bin).map_err(|e| e.to_string())?;
+        if self.bin_folder_name.is_empty() {
+            self.set_status_message(
+                "⚠ Sélectionnez ou créez un sous-dossier avant de trier.",
+                egui::Color32::RED,
+                3.0,
+            );
+            return Err("Aucun dossier de tri sélectionné.".to_string());
+        } else {
 
-        let name = p.file_name().ok_or("Nom de fichier invalide.")?;
-        let mut dst = bin.join(name);
+            let p = self.path_a.clone().ok_or("Aucune image chargée.")?;
+            let dir = p.parent().ok_or("Chemin sans parent.")?;
+            let bin = dir.join(self.bin_folder_name.as_str());
+            fs::create_dir_all(&bin).map_err(|e| e.to_string())?;
 
-        // Nom unique si collision
-        if dst.exists() {
-            let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("image");
-            let ext  = p.extension().and_then(|s| s.to_str()).unwrap_or("");
-            let mut i = 1;
-            loop {
-                let cand = if ext.is_empty() {
-                    bin.join(format!("{stem}_{i}"))
-                } else {
-                    bin.join(format!("{stem}_{i}.{ext}"))
-                };
-                if !cand.exists() { dst = cand; break; }
-                i += 1;
+            let name = p.file_name().ok_or("Nom de fichier invalide.")?;
+            let mut dst = bin.join(name);
+
+            // Nom unique si collision
+            if dst.exists() {
+                let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("image");
+                let ext  = p.extension().and_then(|s| s.to_str()).unwrap_or("");
+                let mut i = 1;
+                loop {
+                    let cand = if ext.is_empty() {
+                        bin.join(format!("{stem}_{i}"))
+                    } else {
+                        bin.join(format!("{stem}_{i}.{ext}"))
+                    };
+                    if !cand.exists() { dst = cand; break; }
+                    i += 1;
+                }
             }
-        }
 
-        // Déplacement (rename) avec fallback copy+remove si autre volume
-        match fs::rename(&p, &dst) {
-            Ok(_) => {}
-            Err(_) => {
-                fs::copy(&p, &dst).map_err(|e| e.to_string())?;
-                fs::remove_file(&p).map_err(|e| e.to_string())?;
+            // Déplacement (rename) avec fallback copy+remove si autre volume
+            match fs::rename(&p, &dst) {
+                Ok(_) => {}
+                Err(_) => {
+                    fs::copy(&p, &dst).map_err(|e| e.to_string())?;
+                    fs::remove_file(&p).map_err(|e| e.to_string())?;
+                }
             }
+
+            // Recharger la suivante dans le dossier  
+
+            self.after_move_reload_next(ctx, dir, &p)?;
+            
+            Ok(())
         }
-
-        // Recharger la suivante dans le dossier  
-
-        self.after_move_reload_next(ctx, dir, &p)?;
-        
-        Ok(())
     }
 
     /// Après déplacement, ouvre la "suivante" du dossier (par nom) ; sinon nettoie l'affichage.
@@ -2611,9 +2638,15 @@ impl eframe::App for App {
                             }
                         )
                         .show_ui(ui, |ui| {
-                            for folder in &self.subfolders {
-                                if ui.selectable_label(self.bin_folder_name == *folder, folder).clicked() {
-                                    self.bin_folder_name = folder.clone();
+                            if self.subfolders.is_empty() {
+                                // Aucun sous-dossier → forcer la création
+                                ui.label("⚠ Aucun sous-dossier disponible.");
+                            } else {
+                                // Sous-dossiers existants
+                                for folder in &self.subfolders {
+                                    if ui.selectable_label(self.bin_folder_name == *folder, folder).clicked() {
+                                        self.bin_folder_name = folder.clone();
+                                    }
                                 }
                             }
 
@@ -2623,6 +2656,7 @@ impl eframe::App for App {
                                 self.new_folder_input.clear();
                             }
                         });
+
 
 
                     ui.add_space(12.0);
@@ -2654,48 +2688,44 @@ impl eframe::App for App {
             painter.rect_filled(screen_rect, 0.0, egui::Color32::from_black_alpha(200));
 
             // --- fenêtre modale ---
-            egui::Window::new("Créer un dossier")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .title_bar(true)
-                .show(ctx, |ui| {
-                    ui.label("Nom du nouveau dossier (A–Z, a–z, 0–9, _ , -) :");
+           egui::Window::new("Créer un dossier")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label("Nom du nouveau dossier (A–Z, a–z, 0–9, _ , -) :");
+                let resp = ui.text_edit_singleline(&mut self.new_folder_input);
 
-                    let resp = ui.text_edit_singleline(&mut self.new_folder_input);
-
-                    // nettoyage
-                    if resp.changed() {
-                        self.new_folder_input.retain(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-                        if self.new_folder_input.len() > 20 {
-                            self.new_folder_input.truncate(20);
-                        }
+                if resp.changed() {
+                    self.new_folder_input.retain(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+                    if self.new_folder_input.len() > 20 {
+                        self.new_folder_input.truncate(20);
                     }
+                }
 
-                    ui.horizontal(|ui| {
-                        if ui.button("Créer").clicked() && !self.new_folder_input.is_empty() {
-                            if let Some(img_path) = &self.path_a {
-                                if let Some(parent) = img_path.parent() {
-                                    let new_dir = parent.join(&self.new_folder_input);
-                                    if let Err(e) = std::fs::create_dir_all(&new_dir) {
-                                        eprintln!("Erreur création dossier: {e}");
-                                    } else {
-                                        self.bin_folder_name = self.new_folder_input.clone();
-                                        self.refresh_subfolders();
-                                    }
+                ui.horizontal(|ui| {
+                    if ui.button("Créer").clicked() && !self.new_folder_input.is_empty() {
+                        if let Some(img_path) = &self.path_a {
+                            if let Some(parent) = img_path.parent() {
+                                let new_dir = parent.join(&self.new_folder_input);
+                                if let Err(e) = std::fs::create_dir_all(&new_dir) {
+                                    eprintln!("Erreur création dossier: {e}");
+                                } else {
+                                    self.bin_folder_name = self.new_folder_input.clone();
+                                    self.refresh_subfolders();
                                 }
                             }
-                            self.show_new_folder_dialog = false;
                         }
+                        self.show_new_folder_dialog = false;
+                    }
 
-                        if ui.button("Annuler").clicked() {
-                            self.show_new_folder_dialog = false;
-                        }
-                    });
+                    if ui.button("Annuler").clicked() {
+                        self.show_new_folder_dialog = false;
+                    }
                 });
+            });
 
-            // 🔹 on retourne ici → le reste de l’UI n’est pas rendu tant que le modal est actif
-            return;
+        return; // ⚠ bloquer le reste de l’UI pendant le modal
         }
 
         // Panneau central
@@ -2719,80 +2749,80 @@ impl eframe::App for App {
             let right_rect = egui::Rect::from_min_max(egui::pos2(split_x, panel_rect.top()), panel_rect.right_bottom());
 
             // fit/center
-        if self.compare_enabled {
-            match self.compare_mode {
-                CompareMode::Split => {
-                    if self.request_fit {
-                        let mut scales: Vec<f32> = vec![];
-                        if self.size_a != [0, 0] {
-                            scales.push((left_rect.width()  / self.size_a[0] as f32)
-                                .min(left_rect.height() / self.size_a[1] as f32));
+            if self.compare_enabled {
+                match self.compare_mode {
+                    CompareMode::Split => {
+                        if self.request_fit {
+                            let mut scales: Vec<f32> = vec![];
+                            if self.size_a != [0, 0] {
+                                scales.push((left_rect.width()  / self.size_a[0] as f32)
+                                    .min(left_rect.height() / self.size_a[1] as f32));
+                            }
+                            if self.size_b != [0, 0] {
+                                scales.push((right_rect.width() / self.size_b[0] as f32)
+                                    .min(right_rect.height() / self.size_b[1] as f32));
+                            }
+                            if let Some(mins) = scales.into_iter().reduce(f32::min) {
+                                let fit = mins.min(1.0); 
+                                self.zoom = fit.max(0.05);
+                                self.min_zoom = (self.zoom * 0.001).max(0.005);
+                            }
+                            self.compare_center_uv = [0.5, 0.5];
+                            self.request_fit = false;
                         }
-                        if self.size_b != [0, 0] {
-                            scales.push((right_rect.width() / self.size_b[0] as f32)
-                                .min(right_rect.height() / self.size_b[1] as f32));
+                        if self.request_one_to_one {
+                            
+                            self.zoom = 1.0;
+                            // recentrer (à adapter à tes champs : center UV partagé ou par-slot)
+                            self.compare_center_uv = [0.5, 0.5];
+                            // self.offset = egui::vec2(0.0, 0.0);  // si tu as un pan en pixels
+
+                            self.request_fit = false;
+                            self.fit_allow_upscale = false;
+
+                            self.request_one_to_one = false;
                         }
-                        if let Some(mins) = scales.into_iter().reduce(f32::min) {
-                            let fit = mins.min(1.0); 
-                            self.zoom = fit.max(0.05);
-                            self.min_zoom = (self.zoom * 0.001).max(0.005);
+                        if self.request_center {
+                            self.compare_center_uv = [0.5, 0.5];
+                            self.request_center = false;
                         }
-                        self.compare_center_uv = [0.5, 0.5];
-                        self.request_fit = false;
                     }
-                    if self.request_one_to_one {
+                    // Blink et Diff: fit comme en mode normal, sur tout le panel
+                    _ => {
+                        let ref_tex = if self.size_a != [0, 0] { self.size_a } else { self.size_b };
+                        if self.request_fit && ref_tex != [0, 0] {
+                            let zx = panel_rect.width()  / ref_tex[0] as f32;
+                            let zy = panel_rect.height() / ref_tex[1] as f32;
+                            let fit = zx.min(zy);
+                            // si cmd_fit a été demandé : on autorise l'upscale ; sinon on borne à 1.0
+                            let target = if self.fit_allow_upscale { fit } else { fit.min(1.0) };
                         
-                        self.zoom = 1.0;
-                        // recentrer (à adapter à tes champs : center UV partagé ou par-slot)
-                        self.compare_center_uv = [0.5, 0.5];
-                        // self.offset = egui::vec2(0.0, 0.0);  // si tu as un pan en pixels
+                            self.zoom = target.max(0.05);
+                            self.min_zoom = (self.zoom * 0.001).max(0.005);
 
-                        self.request_fit = false;
-                        self.fit_allow_upscale = false;
+                            self.center_in(panel_rect, ref_tex);
+                            self.request_fit = false;
+                        }
+                        // 1:1 intelligent
+                        if self.request_one_to_one {
+                            self.zoom = 1.0;
+                            // recentrer (à adapter à tes champs : center UV partagé ou par-slot)
+                            self.compare_center_uv = [0.5, 0.5];
+                            // self.offset = egui::vec2(0.0, 0.0);  // si tu as un pan en pixels
 
-                        self.request_one_to_one = false;
-                    }
-                    if self.request_center {
-                        self.compare_center_uv = [0.5, 0.5];
-                        self.request_center = false;
-                    }
-                }
-                // Blink et Diff: fit comme en mode normal, sur tout le panel
-                _ => {
-                    let ref_tex = if self.size_a != [0, 0] { self.size_a } else { self.size_b };
-                    if self.request_fit && ref_tex != [0, 0] {
-                        let zx = panel_rect.width()  / ref_tex[0] as f32;
-                        let zy = panel_rect.height() / ref_tex[1] as f32;
-                        let fit = zx.min(zy);
-                        // si cmd_fit a été demandé : on autorise l'upscale ; sinon on borne à 1.0
-                        let target = if self.fit_allow_upscale { fit } else { fit.min(1.0) };
-                       
-                        self.zoom = target.max(0.05);
-                        self.min_zoom = (self.zoom * 0.001).max(0.005);
+                            self.request_fit = false;
+                            self.fit_allow_upscale = false;
 
-                        self.center_in(panel_rect, ref_tex);
-                        self.request_fit = false;
-                    }
-                    // 1:1 intelligent
-                    if self.request_one_to_one {
-                        self.zoom = 1.0;
-                        // recentrer (à adapter à tes champs : center UV partagé ou par-slot)
-                        self.compare_center_uv = [0.5, 0.5];
-                        // self.offset = egui::vec2(0.0, 0.0);  // si tu as un pan en pixels
+                            self.request_one_to_one = false;
+                        }
 
-                        self.request_fit = false;
-                        self.fit_allow_upscale = false;
-
-                        self.request_one_to_one = false;
-                    }
-
-                    if self.request_center && ref_tex != [0, 0] {
-                        self.center_in(panel_rect, ref_tex);
-                        self.request_center = false;
+                        if self.request_center && ref_tex != [0, 0] {
+                            self.center_in(panel_rect, ref_tex);
+                            self.request_center = false;
+                        }
                     }
                 }
-            }
-            } else {
+                } else {
                 let size_now = panel_rect.size();
                 if self.keep_center_on_resize {
                     if let Some(prev) = self.last_panel_size {
@@ -3100,9 +3130,35 @@ impl eframe::App for App {
                         ui.separator();
                         ui.label(format!("B: {}×{}", self.size_b[0], self.size_b[1]));
                     }
+                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some((msg, color)) = &self.status_message {
+                            egui::Frame::none()
+                                .fill(egui::Color32::WHITE)   // fond blanc
+                                .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                                .show(ui, |ui| {
+                                    ui.colored_label(*color, msg);
+                                });
+                        } else {
+                            ui.label(" "); // ligne vide si pas de message
+                        }
+                    });
                 });
             });
         });
+
+        //Timer pour le status message
+        let dt = ctx.input(|i| i.stable_dt); // temps frame
+        // décrémentation + auto-suppression
+        if self.status_timer > 0.0 {
+            self.status_timer -= dt;
+            if self.status_timer <= 0.0 {
+                self.status_message = None;
+            } else {
+                // 🔹 Tant qu’un message est affiché → on redessine
+                ctx.request_repaint();
+            }
+        }
+
 
        // Histogrammes (A et B)
         if self.hist_dirty {
