@@ -1438,6 +1438,12 @@ struct App {
     size_b: [usize; 2],
     tex_b_cpu: Option<egui::TextureHandle>,
 
+    // mode slideshow
+    slideshow_mode: bool,
+    auto_slideshow: bool,
+    slideshow_interval: f32,    // en secondes
+    slideshow_timer: f32,       // compteur interne
+
     //PDF
     pdf_pages_a: Option<Vec<egui::ColorImage>>,
     current_page_index_a: usize,
@@ -1546,6 +1552,11 @@ impl Default for App {
             orig_b: None,
             size_b: [0, 0],
             tex_b_cpu: None,
+
+            slideshow_mode: false,
+            auto_slideshow: false,
+            slideshow_interval: 5.0,
+            slideshow_timer: 0.0,
 
             pdf_pages_a: None,
             current_page_index_a: 0,
@@ -2186,6 +2197,61 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
 
+        // sortie du diaporama avec Échap
+        if self.slideshow_mode && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.slideshow_mode = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        }
+
+        //Timer autoslideshow
+        if self.slideshow_mode && self.auto_slideshow {
+            let dt = ctx.input(|i| i.stable_dt); // delta temps frame
+            self.slideshow_timer -= dt;
+
+            if self.slideshow_timer <= 0.0 {
+                let _ = self.navigate_a(ctx, 1); // avancer
+                self.slideshow_timer = self.slideshow_interval; // reset
+            }
+            // 🔹 forcer un redraw même sans interaction
+            ctx.request_repaint();
+        }
+
+        if self.slideshow_mode {
+            // navigation flèches gauche/droite
+            let nav = ctx.input(|i| {
+                if i.key_pressed(egui::Key::ArrowRight) {
+                    Some(1)
+                } else if i.key_pressed(egui::Key::ArrowLeft) {
+                    Some(-1)
+                } else {
+                    None
+                }
+            });
+
+            if let Some(step) = nav {
+                let _ = self.navigate_a(ctx, step); // ta fonction existante pour naviguer les images A
+                if self.auto_slideshow {
+                    self.slideshow_timer = self.slideshow_interval; // reset si navigation manuelle
+                }
+            }
+
+            // affichage image A plein écran
+            egui::CentralPanel::default().show(ctx, |ui| {
+                if let Some(tex) = &self.tex_a_cpu {
+                    let avail = ui.available_size();
+                    let tex_size = tex.size_vec2();
+                    let scale = (avail.x / tex_size.x).min(avail.y / tex_size.y);
+                    let scaled = tex_size * scale;
+
+                    ui.centered_and_justified(|ui| {
+                        ui.image((tex.id(), scaled));
+                    });
+                }
+            });
+
+            return; // bloque le reste de l'UI pendant le diaporama
+        }
+
         // Drop différé des anciennes textures (celles collectées au frame précédent)
         self.pending_free.clear();
 
@@ -2267,214 +2333,226 @@ impl eframe::App for App {
                 }
             }
 
-                ui.separator();
-                let disable_a = self.filelist_a.len() <= 1;
-                let disable_b = self.filelist_b.len() <= 1;
+            ui.separator();
+            let disable_a = self.filelist_a.len() <= 1;
+            let disable_b = self.filelist_b.len() <= 1;
 
-                // ---- Navigation pour A ----
-                if self.pdf_pages_a.is_some() {
-                    // Navigation PDF A
-                    let pages = self.pdf_pages_a.as_ref().unwrap();
+            // ---- Navigation pour A ----
+            if self.pdf_pages_a.is_some() {
+                // Navigation PDF A
+                let pages = self.pdf_pages_a.as_ref().unwrap();
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(self.current_page_index_a > 0, egui::Button::new("A ◀ P. préc."))
+                        .clicked()
+                    {
+                        self.current_page_index_a -= 1;
+                        let page = &pages[self.current_page_index_a];
+
+                        // met à jour image CPU
+                        self.size_a = page.size;
+                        self.orig_a = Some(std::sync::Arc::new(page.as_raw().to_vec()));
+
+                        // re-upload GPU
+                        let opts = if self.linear_filter { egui::TextureOptions::LINEAR } else { egui::TextureOptions::NEAREST };
+                        let tex = ctx.load_texture("imgA_cpu", page.clone(), opts);
+                        if let Some(old) = self.tex_a_cpu.replace(tex) {
+                            self.pending_free.push(old);
+                        }
+
+                        self.hist_dirty = true;
+                        self.request_center = true;
+                    }
+
+                    if ui
+                        .add_enabled(self.current_page_index_a + 1 < pages.len(), egui::Button::new("A P. suiv. ▶"))
+                        .clicked()
+                    {
+                        self.current_page_index_a += 1;
+                        let page = &pages[self.current_page_index_a];
+
+                        self.size_a = page.size;
+                        self.orig_a = Some(std::sync::Arc::new(page.as_raw().to_vec()));
+
+                        let opts = if self.linear_filter { egui::TextureOptions::LINEAR } else { egui::TextureOptions::NEAREST };
+                        let tex = ctx.load_texture("imgA_cpu", page.clone(), opts);
+                        if let Some(old) = self.tex_a_cpu.replace(tex) {
+                            self.pending_free.push(old);
+                        }
+
+                        self.hist_dirty = true;
+                        self.request_center = true;
+                    }
+
+                    ui.label(format!("Page {}/{}", self.current_page_index_a + 1, pages.len()));
+                });
+            } else {
+                // Navigation dossier A (comme avant)
+                if ui
+                    .add_enabled(!disable_a, egui::Button::new("A ◀ Préc."))
+                    .clicked()
+                {
+                    let _ = self.navigate_a(ctx, -1);
+                }
+                if ui
+                    .add_enabled(!disable_a, egui::Button::new("A Suiv. ▶"))
+                    .clicked()
+                {
+                    let _ = self.navigate_a(ctx, 1);
+                }
+            }
+
+            // ---- Navigation pour B (si compare_enabled et PDF B chargé) ----
+            if self.compare_enabled {
+                if let Some(pages) = &self.pdf_pages_b {
                     ui.horizontal(|ui| {
                         if ui
-                            .add_enabled(self.current_page_index_a > 0, egui::Button::new("A ◀ P. préc."))
-                            .clicked()
-                        {
-                            self.current_page_index_a -= 1;
-                            let page = &pages[self.current_page_index_a];
+                        .add_enabled(self.current_page_index_b > 0, egui::Button::new("B ◀ P. préc."))
+                        .clicked()
+                    {
+                        self.current_page_index_b -= 1;
+                        let page = &pages[self.current_page_index_b];
 
-                            // met à jour image CPU
-                            self.size_a = page.size;
-                            self.orig_a = Some(std::sync::Arc::new(page.as_raw().to_vec()));
+                        // maj buffer CPU
+                        self.size_b = page.size;
+                        self.orig_b = Some(std::sync::Arc::new(page.as_raw().to_vec()));
 
-                            // re-upload GPU
-                            let opts = if self.linear_filter { egui::TextureOptions::LINEAR } else { egui::TextureOptions::NEAREST };
-                            let tex = ctx.load_texture("imgA_cpu", page.clone(), opts);
-                            if let Some(old) = self.tex_a_cpu.replace(tex) {
-                                self.pending_free.push(old);
-                            }
-
-                            self.hist_dirty = true;
-                            self.request_center = true;
+                        // re-upload GPU
+                        let opts = if self.linear_filter { egui::TextureOptions::LINEAR } else { egui::TextureOptions::NEAREST };
+                        let tex = ctx.load_texture("imgB_cpu", page.clone(), opts);
+                        if let Some(old) = self.tex_b_cpu.replace(tex) {
+                            self.pending_free.push(old);
                         }
 
-                        if ui
-                            .add_enabled(self.current_page_index_a + 1 < pages.len(), egui::Button::new("A P. suiv. ▶"))
-                            .clicked()
-                        {
-                            self.current_page_index_a += 1;
-                            let page = &pages[self.current_page_index_a];
+                        self.hist_dirty = true;
+                        self.request_center = true;
+                    }
 
-                            self.size_a = page.size;
-                            self.orig_a = Some(std::sync::Arc::new(page.as_raw().to_vec()));
+                    if ui
+                        .add_enabled(self.current_page_index_b + 1 < pages.len(), egui::Button::new("B P. suiv. ▶"))
+                        .clicked()
+                    {
+                        self.current_page_index_b += 1;
+                        let page = &pages[self.current_page_index_b];
 
-                            let opts = if self.linear_filter { egui::TextureOptions::LINEAR } else { egui::TextureOptions::NEAREST };
-                            let tex = ctx.load_texture("imgA_cpu", page.clone(), opts);
-                            if let Some(old) = self.tex_a_cpu.replace(tex) {
-                                self.pending_free.push(old);
-                            }
+                        self.size_b = page.size;
+                        self.orig_b = Some(std::sync::Arc::new(page.as_raw().to_vec()));
 
-                            self.hist_dirty = true;
-                            self.request_center = true;
+                        let opts = if self.linear_filter { egui::TextureOptions::LINEAR } else { egui::TextureOptions::NEAREST };
+                        let tex = ctx.load_texture("imgB_cpu", page.clone(), opts);
+                        if let Some(old) = self.tex_b_cpu.replace(tex) {
+                            self.pending_free.push(old);
                         }
 
-                        ui.label(format!("Page {}/{}", self.current_page_index_a + 1, pages.len()));
-                    });
+                        self.hist_dirty = true;
+                        self.request_center = true;
+                    }
+
+                    ui.label(format!("Page {}/{}", self.current_page_index_b + 1, pages.len()));
+                });
                 } else {
-                    // Navigation dossier A (comme avant)
+                    // Navigation dossier B (comme avant)
                     if ui
-                        .add_enabled(!disable_a, egui::Button::new("A ◀ Préc."))
+                        .add_enabled(!disable_b, egui::Button::new("B ◀ Préc."))
                         .clicked()
                     {
-                        let _ = self.navigate_a(ctx, -1);
+                        let _ = self.navigate_b(ctx, -1);
                     }
                     if ui
-                        .add_enabled(!disable_a, egui::Button::new("A Suiv. ▶"))
+                        .add_enabled(!disable_b, egui::Button::new("B Suiv. ▶"))
                         .clicked()
                     {
-                        let _ = self.navigate_a(ctx, 1);
+                        let _ = self.navigate_b(ctx, 1);
                     }
                 }
+            }
 
-                // ---- Navigation pour B (si compare_enabled et PDF B chargé) ----
-                if self.compare_enabled {
-                    if let Some(pages) = &self.pdf_pages_b {
-                        ui.horizontal(|ui| {
-                           if ui
-                            .add_enabled(self.current_page_index_b > 0, egui::Button::new("B ◀ P. préc."))
-                            .clicked()
-                        {
-                            self.current_page_index_b -= 1;
-                            let page = &pages[self.current_page_index_b];
-
-                            // maj buffer CPU
-                            self.size_b = page.size;
-                            self.orig_b = Some(std::sync::Arc::new(page.as_raw().to_vec()));
-
-                            // re-upload GPU
-                            let opts = if self.linear_filter { egui::TextureOptions::LINEAR } else { egui::TextureOptions::NEAREST };
-                            let tex = ctx.load_texture("imgB_cpu", page.clone(), opts);
-                            if let Some(old) = self.tex_b_cpu.replace(tex) {
-                                self.pending_free.push(old);
-                            }
-
-                            self.hist_dirty = true;
-                            self.request_center = true;
-                        }
-
-                        if ui
-                            .add_enabled(self.current_page_index_b + 1 < pages.len(), egui::Button::new("B P. suiv. ▶"))
-                            .clicked()
-                        {
-                            self.current_page_index_b += 1;
-                            let page = &pages[self.current_page_index_b];
-
-                            self.size_b = page.size;
-                            self.orig_b = Some(std::sync::Arc::new(page.as_raw().to_vec()));
-
-                            let opts = if self.linear_filter { egui::TextureOptions::LINEAR } else { egui::TextureOptions::NEAREST };
-                            let tex = ctx.load_texture("imgB_cpu", page.clone(), opts);
-                            if let Some(old) = self.tex_b_cpu.replace(tex) {
-                                self.pending_free.push(old);
-                            }
-
-                            self.hist_dirty = true;
-                            self.request_center = true;
-                        }
-
-                        ui.label(format!("Page {}/{}", self.current_page_index_b + 1, pages.len()));
-                    });
-                    } else {
-                        // Navigation dossier B (comme avant)
-                        if ui
-                            .add_enabled(!disable_b, egui::Button::new("B ◀ Préc."))
-                            .clicked()
-                        {
-                            let _ = self.navigate_b(ctx, -1);
-                        }
-                        if ui
-                            .add_enabled(!disable_b, egui::Button::new("B Suiv. ▶"))
-                            .clicked()
-                        {
-                            let _ = self.navigate_b(ctx, 1);
-                        }
-                    }
-                }
-
+            //Bouton Diaporama et options connexes
+            if !self.compare_enabled && self.orig_a.is_some() {
                 ui.separator();
-                if ui.button("Fit (F)").clicked() || ui.input(|i| i.key_pressed(egui::Key::F)) {
-                    self.fit_allow_upscale = true;
-                    self.cmd_fit();
-                }
-                if ui.button("Centrer").clicked() {
-                    self.cmd_center();
-                }
-                if ui.button("1:1 (1)").clicked() || ui.input(|i| i.key_pressed(egui::Key::Num1)) {
-                    self.cmd_one_to_one();
-                }
-                if ui.button("Reset (R)").clicked() || ui.input(|i| i.key_pressed(egui::Key::R)) {
-                    self.request_fit = true;
-                    self.fit_allow_upscale = false; // reset fit            
-                    self.request_center = true;
+                if ui.button("🎞 Diaporama").clicked() {
+                    self.slideshow_mode = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
                 }
 
+                if ui.checkbox(&mut self.auto_slideshow, "Défilement auto").changed() {
+                    if self.auto_slideshow {
+                        self.slideshow_timer = self.slideshow_interval;
+                    }
+                 }
+
+                ui.add(
+                egui::Slider::new(&mut self.slideshow_interval, 1.0..=30.0)
+                    .text("Intervalle (s)")
+                );
+            }
+
+          
+            // toggle diaporama avec F11
+            if ctx.input(|i| i.key_pressed(egui::Key::F11)) {
+                self.slideshow_mode = !self.slideshow_mode;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.slideshow_mode));
+            }
+
+            
+
+            ui.separator();
+
+            // --- PATCH: mémorise l'état avant interaction ---
+            let was_compare_enabled = self.compare_enabled;
+            let was_mode = self.compare_mode;
+
+            if self.orig_b.is_some(){ui.checkbox(&mut self.compare_enabled, "A/B");}
+            
+            if self.compare_enabled && self.orig_a.is_some() && self.orig_b.is_some() {
+                ui.separator();
+                ui.label("Mode :");
+                ui.selectable_value(&mut self.compare_mode, CompareMode::Split, "Split");
+                ui.selectable_value(&mut self.compare_mode, CompareMode::Blink, "Blink");
+                ui.selectable_value(&mut self.compare_mode, CompareMode::Diff,  "Diff");
                 ui.separator();
 
-                // --- PATCH: mémorise l'état avant interaction ---
-                let was_compare_enabled = self.compare_enabled;
-                let was_mode = self.compare_mode;
+                match self.compare_mode {
+                    CompareMode::Split => {
+                        //ui.add(egui::Slider::new(&mut self.compare_split, 0.0..=1.0).text("Split (A ⇠ B)"));
+                        ui.add(egui::Slider::new(&mut self.compare_spacing, -1.0..=1.0).step_by(0.001).drag_value_speed(0.001).text("Horz."));
+                        ui.add(egui::Slider::new(&mut self.compare_vertical_offset, -1.0..=1.0).step_by(0.001).drag_value_speed(0.001).text("Vert."));
+                        if ui.button("Init.").clicked() {
+                            self.compare_spacing = 0.000;
+                            self.compare_vertical_offset = 0.000;
+                        }             
+                    }
+                    CompareMode::Blink => {
+                        ui.add(egui::Slider::new(&mut self.blink_hz, 0.5..=8.0).text("Vitesse (Hz)").logarithmic(true));
+                        // --- PATCH: si on vient d'activer Blink, centre l'image ---
+                        let blink_just_enabled =
+                            self.compare_enabled
+                            && (!was_compare_enabled || was_mode != self.compare_mode)
+                            && matches!(self.compare_mode, CompareMode::Blink);
 
-                if self.orig_b.is_some(){ui.checkbox(&mut self.compare_enabled, "A/B");}
-                
-                if self.compare_enabled && self.orig_a.is_some() && self.orig_b.is_some() {
-                    ui.separator();
-                    ui.label("Mode :");
-                    ui.selectable_value(&mut self.compare_mode, CompareMode::Split, "Split");
-                    ui.selectable_value(&mut self.compare_mode, CompareMode::Blink, "Blink");
-                    ui.selectable_value(&mut self.compare_mode, CompareMode::Diff,  "Diff");
-                    ui.separator();
-
-                    match self.compare_mode {
-                        CompareMode::Split => {
-                            //ui.add(egui::Slider::new(&mut self.compare_split, 0.0..=1.0).text("Split (A ⇠ B)"));
-                            ui.add(egui::Slider::new(&mut self.compare_spacing, -1.0..=1.0).step_by(0.001).drag_value_speed(0.001).text("Horz."));
-                            ui.add(egui::Slider::new(&mut self.compare_vertical_offset, -1.0..=1.0).step_by(0.001).drag_value_speed(0.001).text("Vert."));
-                            if ui.button("Init.").clicked() {
-                                self.compare_spacing = 0.000;
-                                self.compare_vertical_offset = 0.000;
-                            }             
+                        if blink_just_enabled {
+                            // centre au prochain frame (utilise ta logique existante dans le CentralPanel)
+                            self.compare_center_uv = [0.5, 0.5];
+                            self.request_center = true;
+                            ui.ctx().request_repaint();
                         }
-                        CompareMode::Blink => {
-                            ui.add(egui::Slider::new(&mut self.blink_hz, 0.5..=8.0).text("Vitesse (Hz)").logarithmic(true));
-                            // --- PATCH: si on vient d'activer Blink, centre l'image ---
-                            let blink_just_enabled =
-                                self.compare_enabled
-                                && (!was_compare_enabled || was_mode != self.compare_mode)
-                                && matches!(self.compare_mode, CompareMode::Blink);
+                    }
+                    CompareMode::Diff => {
+                        ui.label("Affiche |A - B| (après corrections).");
+                        let diff_just_enabled =
+                            self.compare_enabled
+                            && (!was_compare_enabled || was_mode != self.compare_mode)
+                            && matches!(self.compare_mode, CompareMode::Diff);
 
-                            if blink_just_enabled {
-                                // centre au prochain frame (utilise ta logique existante dans le CentralPanel)
-                                self.compare_center_uv = [0.5, 0.5];
-                                self.request_center = true;
-                                ui.ctx().request_repaint();
-                            }
-                        }
-                        CompareMode::Diff => {
-                            ui.label("Affiche |A - B| (après corrections).");
-                            let diff_just_enabled =
-                                self.compare_enabled
-                                && (!was_compare_enabled || was_mode != self.compare_mode)
-                                && matches!(self.compare_mode, CompareMode::Diff);
-
-                            if diff_just_enabled {
-                                // centre au prochain frame (utilise ta logique existante dans le CentralPanel)
-                                self.compare_center_uv = [0.5, 0.5];
-                                self.request_center = true;
-                                ui.ctx().request_repaint();
-                            }
+                        if diff_just_enabled {
+                            // centre au prochain frame (utilise ta logique existante dans le CentralPanel)
+                            self.compare_center_uv = [0.5, 0.5];
+                            self.request_center = true;
+                            ui.ctx().request_repaint();
                         }
                     }
                 }
+            }
             
             });
         });
@@ -2502,7 +2580,7 @@ impl eframe::App for App {
                 // -- Bouton About
                     if ui.add(
                 egui::Button::new(
-                    RichText::new("?").color(egui::Color32::from_rgb(255, 255, 255)))
+                    RichText::new("ℹ").color(egui::Color32::from_rgb(255, 255, 255)))
                         .fill(egui::Color32::from_rgb(231, 52, 21))
                     ).clicked() {
                         self.show_about = true;
@@ -2516,7 +2594,26 @@ impl eframe::App for App {
         // Panneau outils (droite)
         if self.show_options {
             egui::SidePanel::right("tools").default_width(278.0).resizable(false).show(ctx, |ui| {
-                ui.heading("Transformations");
+                ui.add_space(4.0);
+                ui.heading("Affichage");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Fit (F)").clicked() || ui.input(|i| i.key_pressed(egui::Key::F)) {
+                        self.fit_allow_upscale = true;
+                        self.cmd_fit();
+                    }
+                    if ui.button("Centrer").clicked() {
+                        self.cmd_center();
+                    }
+                    if ui.button("1:1 (1)").clicked() || ui.input(|i| i.key_pressed(egui::Key::Num1)) {
+                        self.cmd_one_to_one();
+                    }
+                });
+                // if ui.button("Reset (R)").clicked() || ui.input(|i| i.key_pressed(egui::Key::R)) {
+                //     self.request_fit = true;
+                //     self.fit_allow_upscale = false; // reset fit            
+                //     self.request_center = true;
+                // }
                 ui.horizontal(|ui| {
                     if ui.button("180°").clicked() {
                         self.cmd_rotate_180();
@@ -2528,9 +2625,7 @@ impl eframe::App for App {
                         self.cmd_flip_v();
                     }
                 });
-
-                ui.separator();
-                ui.heading("Affichage");
+                ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     ui.label("Lissage");
                     let mut linear = self.linear_filter;
@@ -2539,24 +2634,27 @@ impl eframe::App for App {
                     }
                 });
 
-                ui.add_space(6.0);
-                ui.label("Fond du viewer");
+                ui.add_space(8.0);
+                ui.label("Couleur de fond");
                 let mut bg_i = self.bg_gray as i32;
                 if ui.add(egui::Slider::new(&mut bg_i, 0..=255).step_by(1.0).drag_value_speed(1.0).text("Défaut : 18")).changed() 
                 {
                     self.bg_gray = bg_i as u8;
                 }
-
                 ui.add_space(8.0);
-                ui.heading("Zoom");
+                ui.separator();                
+                ui.heading("Vitesse Zoom");
+                ui.add_space(8.0);
                 ui.add(
                     egui::Slider::new(&mut self.zoom_step_percent, 1.0..=100.0)
                         .step_by(1.0)
-                        .text("Vitesse ( % / cran )"),
+                        .text("( % / cran )"),
                 );
+                ui.add_space(8.0);
 
                 ui.separator();
                 ui.heading("Ajustements (GPU)");
+                ui.add_space(8.0);
                 let (mut b, mut c, mut s, mut g) =
                     (self.brightness, self.contrast, self.saturation, self.gamma);
                 if ui
@@ -2580,6 +2678,7 @@ impl eframe::App for App {
                     self.saturation = s;
                     self.mark_hist_dirty();
                 }
+                
                 if ui
                     .add(egui::Slider::new(&mut g, 0.2..=3.0).text("Gamma").step_by(0.001).drag_value_speed(0.001))
                     .changed()
@@ -2587,6 +2686,7 @@ impl eframe::App for App {
                     self.gamma = g;
                     self.mark_hist_dirty();
                 }
+                ui.add_space(8.0);
                 if ui.button("Réinitialiser réglages").clicked() {
                     self.brightness = 0.0;
                     self.contrast = 1.0;
@@ -2594,9 +2694,11 @@ impl eframe::App for App {
                     self.gamma = 1.0;
                     self.mark_hist_dirty();
                 }
+                ui.add_space(8.0);
 
                 ui.separator();
                 ui.heading("Histogramme (A)");
+                ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     ui.radio_value(&mut self.hist_rgb_mode, false, "Luma");
                     ui.radio_value(&mut self.hist_rgb_mode, true, "RGB");
@@ -3225,7 +3327,7 @@ fn main() -> eframe::Result<()> {
     let native_opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Visua")
-            .with_inner_size(egui::vec2(1800.0, 1200.0))
+            .with_inner_size(egui::vec2(1440.0, 800.0))
             .with_min_inner_size(egui::vec2(1440.0, 800.0))       
             .with_icon(icon),
         centered: true, // centrer à l’ouverture
