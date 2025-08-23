@@ -2592,7 +2592,7 @@ impl eframe::App for App {
                     }
                 }
 
-                if !self.compare_enabled && self.pdf_pages_a.is_none() {
+                if !self.compare_enabled && self.pdf_pages_a.is_none() && self.orig_a.is_some() {
                     ui.separator(); 
                     ui.heading("Tri");
                     ui.add_space(6.0);
