@@ -1477,6 +1477,11 @@ struct App {
     // Zoom step (% / cran)
     zoom_step_percent: f32,
    
+    // Module de tri
+    subfolders: Vec<String>,       // liste dynamique
+    show_new_folder_dialog: bool,  // afficher le popup ?
+    new_folder_input: String,      // saisie utilisateur
+
     // Transfos
     rotate_180: bool,
     flip_h: bool,
@@ -1566,6 +1571,10 @@ impl Default for App {
             auto_fit_on_transform: false,
             last_panel_size: None,
 
+            subfolders: Vec::new(),
+            show_new_folder_dialog: false,
+            new_folder_input: String::new(),
+
             fit_allow_upscale: false,
 
             zoom_step_percent: 50.0,
@@ -1618,6 +1627,27 @@ impl Default for App {
 }
 
 impl App {
+
+    fn refresh_subfolders(&mut self) {
+        self.subfolders.clear();
+
+        if let Some(img_path) = &self.path_a {
+            if let Some(parent) = img_path.parent() {
+                if let Ok(entries) = std::fs::read_dir(parent) {
+                    for entry in entries.flatten() {
+                        if entry.path().is_dir() {
+                            if let Some(name) = entry.file_name().to_str() {
+                                self.subfolders.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        self.subfolders.sort();
+    }
+
     /// Déplace l'image courante (A) dans <dossier>/Visua_bin/ en générant un nom unique si besoin,
     /// puis charge automatiquement la suivante (sinon vide l'affichage).
     fn move_current_to_bin(&mut self, ctx: &egui::Context) -> Result<(), String> {
@@ -2159,7 +2189,7 @@ impl eframe::App for App {
                     ui.label("Auteur : AdrienLor");
                     ui.separator();
                     ui.label("Formats pris en charge :");
-                    ui.label("- PNG, JPG, BMP, WEBP, TIFF (incl. 32-bit float)");
+                    ui.label("- PNG, JPG, BMP, WEBP, TGA, GIF, HDR, TIFF (incl. 32-bit float)");
                     ui.label("- FITS (lecteur Rust pur)");
                     ui.label("- PDF (via Pdfium)");
                     ui.separator();
@@ -2567,37 +2597,39 @@ impl eframe::App for App {
                     ui.heading("Tri");
                     ui.add_space(6.0);
 
-                    ui.label("Dossier de tri (A–Z, a–z, 0–9, _ , -) :");
-                    let resp = ui.add(
-                        egui::TextEdit::singleline(&mut self.bin_folder_input)
-                            .hint_text("ex: session_01")
-                            .char_limit(20)                // limite de saisie
-                            .desired_width(160.0)          // optionnel
-                    );
-                    // Sanitize si l’utilisateur a tapé/collé quelque chose
-                    if resp.changed() {
-                        // garde seulement ASCII alnum + '_' + '-'
-                        //let before = self.bin_folder_input.clone();
-                        self.bin_folder_input.retain(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+                    // Toujours rafraîchir la liste
+                    self.refresh_subfolders();
 
-                        // garde max (utile si la version d’egui ne supporte pas .char_limit)
-                        if self.bin_folder_input.len() > 20 {
-                            self.bin_folder_input.truncate(20);
-                        }
+                    ui.label("Dossier de tri :");
 
-                        // MAJ immédiate de la variable de travail
-                        self.bin_folder_name = self.bin_folder_input.clone();
-                    }
+                    egui::ComboBox::from_label("Sous-dossiers")
+                        .selected_text(
+                            if self.bin_folder_name.is_empty() {
+                                "Sélectionner…"
+                            } else {
+                                &self.bin_folder_name
+                            }
+                        )
+                        .show_ui(ui, |ui| {
+                            for folder in &self.subfolders {
+                                if ui.selectable_label(self.bin_folder_name == *folder, folder).clicked() {
+                                    self.bin_folder_name = folder.clone();
+                                }
+                            }
 
-                    // (optionnel) petit indicateur de longueur
-                    ui.small(format!("{} / 20", self.bin_folder_input.len()));
+                            ui.separator();
+                            if ui.button("➕ Créer un nouveau dossier…").clicked() {
+                                self.show_new_folder_dialog = true;
+                                self.new_folder_input.clear();
+                            }
+                        });
 
 
                     ui.add_space(12.0);
                     if ui
                         .add(
                             egui::Button::new(
-                                RichText::new("🗑 Trier (del)").color(egui::Color32::LIGHT_GRAY)
+                                RichText::new("Trier (del)").color(egui::Color32::LIGHT_GRAY)
                             )
                             .fill(egui::Color32::from_rgb(231, 52, 21))
                         )                        
@@ -2610,6 +2642,62 @@ impl eframe::App for App {
                 }
             });
         }
+
+        // Popup pour créer un nouveau dossier
+        if self.show_new_folder_dialog {
+            // --- voile semi-transparent bloquant ---
+            let screen_rect = ctx.screen_rect();
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Background,
+                egui::Id::new("modal_bg"),
+            ));
+            painter.rect_filled(screen_rect, 0.0, egui::Color32::from_black_alpha(200));
+
+            // --- fenêtre modale ---
+            egui::Window::new("Créer un dossier")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .title_bar(true)
+                .show(ctx, |ui| {
+                    ui.label("Nom du nouveau dossier (A–Z, a–z, 0–9, _ , -) :");
+
+                    let resp = ui.text_edit_singleline(&mut self.new_folder_input);
+
+                    // nettoyage
+                    if resp.changed() {
+                        self.new_folder_input.retain(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+                        if self.new_folder_input.len() > 20 {
+                            self.new_folder_input.truncate(20);
+                        }
+                    }
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Créer").clicked() && !self.new_folder_input.is_empty() {
+                            if let Some(img_path) = &self.path_a {
+                                if let Some(parent) = img_path.parent() {
+                                    let new_dir = parent.join(&self.new_folder_input);
+                                    if let Err(e) = std::fs::create_dir_all(&new_dir) {
+                                        eprintln!("Erreur création dossier: {e}");
+                                    } else {
+                                        self.bin_folder_name = self.new_folder_input.clone();
+                                        self.refresh_subfolders();
+                                    }
+                                }
+                            }
+                            self.show_new_folder_dialog = false;
+                        }
+
+                        if ui.button("Annuler").clicked() {
+                            self.show_new_folder_dialog = false;
+                        }
+                    });
+                });
+
+            // 🔹 on retourne ici → le reste de l’UI n’est pas rendu tant que le modal est actif
+            return;
+        }
+
         // Panneau central
         egui::CentralPanel::default().show(ctx, |ui| {
             let avail = ui.available_size();
