@@ -2197,8 +2197,10 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
 
-        // sortie du diaporama avec Échap
-        if self.slideshow_mode && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        // sortie du diaporama avec Échap ou clic droit
+        if self.slideshow_mode
+    && (ctx.input(|i| i.key_pressed(egui::Key::Escape)
+        || i.pointer.secondary_clicked())) {
             self.slideshow_mode = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         }
@@ -2217,11 +2219,14 @@ impl eframe::App for App {
         }
 
         if self.slideshow_mode {
-            // navigation flèches gauche/droite
+            // navigation flèches gauche/droite, clic gauche et molette
             let nav = ctx.input(|i| {
-                if i.key_pressed(egui::Key::ArrowRight) {
+                if i.key_pressed(egui::Key::ArrowRight)
+                    || i.pointer.primary_clicked()           // clic gauche
+                    || i.raw_scroll_delta.y < 0.0                // molette vers le haut
+                {
                     Some(1)
-                } else if i.key_pressed(egui::Key::ArrowLeft) {
+                } else if i.key_pressed(egui::Key::ArrowLeft) || i.raw_scroll_delta.y > 0.0 {
                     Some(-1)
                 } else {
                     None
@@ -2272,26 +2277,51 @@ impl eframe::App for App {
         }
 
         if self.show_about {
-            egui::Window::new("À propos de Visua")
-                .collapsible(false) // pas de flèche déroulante
-                .resizable(false)   // taille fixe
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]) // centré
-                .show(ctx, |ui| {
-                    ui.label("Visua");
-                    ui.label(format!("Version : {}", env!("CARGO_PKG_VERSION")));
-                    ui.label("Auteur : AdrienLor");
-                    ui.separator();
-                    ui.label("Formats pris en charge :");
-                    ui.label("- PNG, JPG, BMP, WEBP, TGA, GIF, HDR, TIFF (incl. 32-bit float)");
-                    ui.label("- FITS (lecteur Rust pur)");
-                    ui.label("- PDF (via Pdfium)");
-                    ui.separator();
+            let screen_rect = ctx.screen_rect();
 
-                    if ui.button("Fermer").clicked() {
-                        self.show_about = false;
-                    }
-        });
-}
+            // 1) Zone invisible absorbant les clics (sous le popup)
+            egui::Area::new(egui::Id::new("modal_blocker"))
+                .order(egui::Order::Middle) // sous la fenêtre
+                .fixed_pos(screen_rect.min)
+                .show(ctx, |ui| {
+                    ui.allocate_response(screen_rect.size(), egui::Sense::click());
+                });
+
+            // 2) Voile semi-transparent
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Background,
+                egui::Id::new("about_modal_bg"),
+            ));
+            painter.rect_filled(screen_rect, 0.0, egui::Color32::from_black_alpha(100));
+
+            // popup
+            egui::Area::new(egui::Id::new("about_modal"))
+                .order(egui::Order::Foreground) // reste toujours au-dessus
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    egui::Frame::window(&ctx.style()).show(ui, |ui| {
+                        ui.heading("🖼 Visua – Image Viewer");
+                        ui.separator();
+                        ui.label("Version 1.1.0");
+                        ui.label("Author: AdrienLor");
+                        ui.separator();
+                        ui.label("Formats :");
+                        ui.label("- PNG, JPG, BMP, WEBP, TGA, GIF, HDR, TIFF (incl. 32-bit float)");
+                        ui.label("- FITS (lecteur Rust pur)");
+                        ui.label("- PDF (via Pdfium)");
+                        ui.separator();
+                        ui.label("Help – Slideshow controls:");
+                        ui.label("• F11 : Enter slideshow fullscreen");
+                        ui.label("• Esc or Right Click : Exit slideshow");
+                        ui.label("• Right Arrow / Left Click / Scroll Down : Next image");
+                        ui.label("• Left Arrow / Scroll Up : Previous image");
+                        ui.separator();
+                        if ui.button("Close").clicked() {
+                            self.show_about = false;
+                        }
+                    });
+                });            
+        }
 
         // Barre du haut — actions
         egui::TopBottomPanel::top("menu").min_height(23.0).show(ctx, |ui| {
@@ -2468,7 +2498,7 @@ impl eframe::App for App {
             }
 
             //Bouton Diaporama et options connexes
-            if !self.compare_enabled && self.orig_a.is_some() {
+            if !self.compare_enabled && self.orig_a.is_some() && !self.pdf_pages_a.is_some() {
                 ui.separator();
                 if ui.button("🎞 Diaporama").clicked() {
                     self.slideshow_mode = true;
@@ -2781,54 +2811,71 @@ impl eframe::App for App {
 
         // Popup pour créer un nouveau dossier
         if self.show_new_folder_dialog {
-            // --- voile semi-transparent bloquant ---
             let screen_rect = ctx.screen_rect();
+
+            // 1) zone invisible absorbant les clics
+            egui::Area::new(egui::Id::new("new_folder_blocker"))
+                .order(egui::Order::Middle)
+                .fixed_pos(screen_rect.min)
+                .show(ctx, |ui| {
+                    ui.allocate_response(screen_rect.size(), egui::Sense::click());
+                });
+
+            // 2) voile semi-transparent
             let painter = ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Background,
-                egui::Id::new("modal_bg"),
+                egui::Id::new("new_folder_modal_bg"),
             ));
-            painter.rect_filled(screen_rect, 0.0, egui::Color32::from_black_alpha(200));
+            painter.rect_filled(screen_rect, 0.0, egui::Color32::from_black_alpha(100));
 
-            // --- fenêtre modale ---
-           egui::Window::new("Créer un dossier")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.label("Nom du nouveau dossier (A–Z, a–z, 0–9, _ , -) :");
-                let resp = ui.text_edit_singleline(&mut self.new_folder_input);
+            // 3) fenêtre modale (toujours au-dessus)
+            egui::Area::new(egui::Id::new("new_folder_modal"))
+                .order(egui::Order::Foreground)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    egui::Frame::window(&ctx.style()).show(ui, |ui| {
+                        ui.heading("Créer un dossier");
+                        ui.separator();
 
-                if resp.changed() {
-                    self.new_folder_input.retain(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-                    if self.new_folder_input.len() > 20 {
-                        self.new_folder_input.truncate(20);
-                    }
-                }
+                        ui.label("Nom du nouveau dossier (A–Z, a–z, 0–9, _ , -) :");
+                        let resp = ui.text_edit_singleline(&mut self.new_folder_input);
 
-                ui.horizontal(|ui| {
-                    if ui.button("Créer").clicked() && !self.new_folder_input.is_empty() {
-                        if let Some(img_path) = &self.path_a {
-                            if let Some(parent) = img_path.parent() {
-                                let new_dir = parent.join(&self.new_folder_input);
-                                if let Err(e) = std::fs::create_dir_all(&new_dir) {
-                                    eprintln!("Erreur création dossier: {e}");
-                                } else {
-                                    self.bin_folder_name = self.new_folder_input.clone();
-                                    self.refresh_subfolders();
-                                }
+                        if resp.changed() {
+                            self.new_folder_input.retain(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+                            if self.new_folder_input.len() > 20 {
+                                self.new_folder_input.truncate(20);
                             }
                         }
-                        self.show_new_folder_dialog = false;
-                    }
 
-                    if ui.button("Annuler").clicked() {
-                        self.show_new_folder_dialog = false;
-                    }
+                        ui.horizontal(|ui| {
+                            if ui.button("Créer").clicked() && !self.new_folder_input.is_empty() {
+                                if let Some(img_path) = &self.path_a {
+                                    if let Some(parent) = img_path.parent() {
+                                        let new_dir = parent.join(&self.new_folder_input);
+                                        if let Err(e) = std::fs::create_dir_all(&new_dir) {
+                                            eprintln!("Erreur création dossier: {e}");
+                                        } else {
+                                            self.bin_folder_name = self.new_folder_input.clone();
+                                            self.refresh_subfolders();
+                                        }
+                                    }
+                                }
+                                self.show_new_folder_dialog = false;
+                            }
+
+                            if ui.button("Annuler").clicked() {
+                                self.show_new_folder_dialog = false;
+                            }
+                        });
+                    });
                 });
-            });
 
-        return; // ⚠ bloquer le reste de l’UI pendant le modal
+            // 4) fermeture via Esc ou clic droit
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape) || i.pointer.secondary_clicked()) {
+                self.show_new_folder_dialog = false;
+            }
         }
+
 
         // Panneau central
         egui::CentralPanel::default().show(ctx, |ui| {
