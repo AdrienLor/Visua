@@ -20,20 +20,6 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
-use pdfium_render::prelude::*;
-
-static PDFIUM_DLL: &[u8] = include_bytes!("../assets/pdfium.dll");
-
-fn init_pdfium() -> Result<Pdfium, Box<dyn std::error::Error>> {
-    // chemin où on va écrire le DLL embarqué
-    let dll_path = std::env::temp_dir().join("pdfium.dll");
-    if !dll_path.exists() {
-        std::fs::write(&dll_path, PDFIUM_DLL)?;
-    }
-
-    Ok(Pdfium::new(Pdfium::bind_to_library(dll_path)?))
-}
-
 
 fn install_panic_hook_once() {
     static ONCE: std::sync::Once = std::sync::Once::new();
@@ -54,7 +40,7 @@ fn is_supported_ext(p: &Path) -> bool {
         .map(|s| s.to_ascii_lowercase())
         .unwrap_or_default();
     matches!(ext.as_str(),
-        "jpg"|"jpeg"|"png"|"bmp"|"gif"|"webp"|"tif"|"tiff"|"fits"|"fit"|"fts")
+        "jpg"|"jpeg"|"png"|"bmp"|"gif"|"webp"|"tif"|"tiff")
 }
 
 #[inline]
@@ -106,36 +92,6 @@ fn estimate_cost(w: u32, h: u32) -> (u64, u64, u64) {
     (cpu, gpu, cpu + gpu)
 }
 
-// Lecture très rapide des dimensions FITS (sans allouer l'image)
-fn peek_fits_dims(path: &std::path::Path) -> Result<(u32, u32), String> {
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    if bytes.len() < 2880 { return Err("FITS: fichier trop petit".into()); }
-
-    let mut pos = 0usize;
-    let mut naxis1: Option<u32> = None;
-    let mut naxis2: Option<u32> = None;
-    loop {
-        if pos + 80 > bytes.len() { break; }
-        let field = &bytes[pos..pos + 80];
-        let line = String::from_utf8_lossy(field);
-        if line.starts_with("END") { break; }
-        if line.len() >= 10 && line.as_bytes()[8] == b'=' {
-            let key = line[0..8].trim();
-            let val = line[10..].split('/').next().unwrap_or("").trim();
-            if key == "NAXIS1" {
-                if let Ok(v) = val.parse::<i64>() { naxis1 = u32::try_from(v).ok(); }
-            } else if key == "NAXIS2" {
-                if let Ok(v) = val.parse::<i64>() { naxis2 = u32::try_from(v).ok(); }
-            }
-        }
-        pos += 80;
-    }
-    match (naxis1, naxis2) {
-        (Some(w), Some(h)) => Ok((w, h)),
-        _ => Err("FITS: dimensions non trouvées".into()),
-    }
-}
-
 // Lecture rapide des dimensions TIFF (sans décoder les pixels)
 fn peek_tiff_dims(path: &std::path::Path) -> Result<(u32, u32), String> {
     use std::fs::File;
@@ -160,33 +116,6 @@ fn resize_rgba8_buf(rgba: Vec<u8>, w: u32, h: u32, tw: u32, th: u32) -> Result<V
     let dynimg = DynamicImage::ImageRgba8(img)
         .resize_exact(tw, th, image::imageops::FilterType::Lanczos3);
     Ok(dynimg.to_rgba8().into_raw())
-}
-
-//================ PDF =======================
-fn load_pdf_as_images(path: &str) -> Result<Vec<egui::ColorImage>, Box<dyn std::error::Error>> {
-    // FIX: bind_to_system_library() marche si pdfium-binaries est activé
-    //let pdfium = Pdfium::new(Pdfium::bind_to_library("../../assets/pdfium.dll")?);
-    let pdfium = init_pdfium()?;
-
-    let doc = pdfium.load_pdf_from_file(path, None)?;
-    let mut pages = Vec::new();
-
-    for page in doc.pages().iter() {
-        let rendered = page.render_with_config(
-            &PdfRenderConfig::new()
-                .set_target_width(1200)
-                .render_form_data(true),
-        )?;
-
-        let bitmap = rendered.as_image();
-        let width = bitmap.width() as usize;
-        let height = bitmap.height() as usize;
-
-        let rgba = bitmap.to_rgba8().into_raw();
-        pages.push(egui::ColorImage::from_rgba_unmultiplied([width, height], &rgba));
-    }
-
-    Ok(pages)
 }
 
 
@@ -344,20 +273,7 @@ fn load_tiff_rgba8(path: &Path) -> Result<(Vec<u8>, [usize; 2]), String> {
     Ok((rgba, wh))
 }
 
-// ======================= FITS (lecteur minimal) =======================
 
-#[derive(Default, Debug)]
-struct FitsHeader {
-    bitpix: i32,
-    naxis: i32,
-    naxis1: usize,
-    naxis2: usize,
-    bzero: f64,
-    bscale: f64,
-}
-fn round_up_2880(n: usize) -> usize {
-    ((n + 2879) / 2880) * 2880
-}
 fn parse_val_num(s: &str) -> Option<f64> {
     let t = s
         .trim()
@@ -366,156 +282,14 @@ fn parse_val_num(s: &str) -> Option<f64> {
         .replace('d', "E");
     t.parse::<f64>().ok()
 }
-fn load_fits_rgba8(path: &Path) -> Result<(Vec<u8>, [usize; 2]), String> {
-    let bytes = fs::read(path).map_err(|e| e.to_string())?;
-    if bytes.len() < 2880 {
-        return Err("FITS: fichier trop petit".into());
-    }
 
-    let mut hdr = FitsHeader {
-        bitpix: 0,
-        naxis: 0,
-        naxis1: 0,
-        naxis2: 0,
-        bzero: 0.0,
-        bscale: 1.0,
-    };
-    let mut end_pos = None::<usize>;
-    let mut pos = 0usize;
-    loop {
-        if pos + 80 > bytes.len() {
-            break;
-        }
-        let card = &bytes[pos..pos + 80];
-        let line = std::str::from_utf8(card).unwrap_or("");
-        let key = &line[0..8].trim();
-        if *key == "END" {
-            end_pos = Some(pos + 80);
-            break;
-        }
-        if line.len() >= 10 && line.as_bytes()[8] == b'=' {
-            let val_comment = &line[10..];
-            let val_str = val_comment.split('/').next().unwrap_or("").trim();
-            match *key {
-                "BITPIX" => {
-                    if let Some(v) = parse_val_num(val_str) {
-                        hdr.bitpix = v as i32;
-                    }
-                }
-                "NAXIS" => {
-                    if let Some(v) = parse_val_num(val_str) {
-                        hdr.naxis = v as i32;
-                    }
-                }
-                "NAXIS1" => {
-                    if let Some(v) = parse_val_num(val_str) {
-                        hdr.naxis1 = v as usize;
-                    }
-                }
-                "NAXIS2" => {
-                    if let Some(v) = parse_val_num(val_str) {
-                        hdr.naxis2 = v as usize;
-                    }
-                }
-                "BZERO" => {
-                    if let Some(v) = parse_val_num(val_str) {
-                        hdr.bzero = v;
-                    }
-                }
-                "BSCALE" => {
-                    if let Some(v) = parse_val_num(val_str) {
-                        hdr.bscale = v;
-                    }
-                }
-                _ => {}
-            }
-        }
-        pos += 80;
-        if pos > 2880 * 2048 {
-            return Err("FITS: header anormalement long".into());
-        }
-    }
-    let end_pos = end_pos.ok_or_else(|| "FITS: END non trouvé".to_string())?;
-    let data_off = round_up_2880(end_pos);
-
-    if hdr.naxis != 2 || hdr.naxis1 == 0 || hdr.naxis2 == 0 {
-        return Err(format!(
-            "FITS: dimensions invalides (NAXIS={}, NAXIS1={}, NAXIS2={})",
-            hdr.naxis, hdr.naxis1, hdr.naxis2
-        ));
-    }
-    let n_elems = hdr
-        .naxis1
-        .checked_mul(hdr.naxis2)
-        .ok_or("FITS: overflow dimensions")?;
-
-    let mut as_f32: Vec<f32> = Vec::with_capacity(n_elems);
-    let need_bytes = match hdr.bitpix {
-        8 => n_elems,
-        16 => n_elems * 2,
-        32 => n_elems * 4,
-        -32 => n_elems * 4,
-        -64 => n_elems * 8,
-        _ => return Err(format!("FITS: BITPIX {} non supporté", hdr.bitpix)),
-    };
-    if data_off + need_bytes > bytes.len() {
-        return Err("FITS: données incomplètes".into());
-    }
-    let data = &bytes[data_off..data_off + need_bytes];
-
-    let bz = hdr.bzero;
-    let bs = hdr.bscale;
-
-    match hdr.bitpix {
-        8 => {
-            for &u in data {
-                let val = bz + bs * (u as f64);
-                as_f32.push(val as f32);
-            }
-        }
-        16 => {
-            for chunk in data.chunks_exact(2) {
-                let raw = i16::from_be_bytes([chunk[0], chunk[1]]) as f64;
-                let val = bz + bs * raw;
-                as_f32.push(val as f32);
-            }
-        }
-        32 => {
-            for chunk in data.chunks_exact(4) {
-                let raw = i32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f64;
-                let val = bz + bs * raw;
-                as_f32.push(val as f32);
-            }
-        }
-        -32 => {
-            for chunk in data.chunks_exact(4) {
-                let raw = f32::from_bits(u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-                let val = bz as f32 + (bs as f32) * raw;
-                as_f32.push(val);
-            }
-        }
-        -64 => {
-            for chunk in data.chunks_exact(8) {
-                let raw = f64::from_bits(u64::from_be_bytes([
-                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-                ]));
-                let val = bz + bs * raw;
-                as_f32.push(val as f32);
-            }
-        }
-        _ => unreachable!(),
-    }
-
-    let rgba = rgba_from_gray_f32(&as_f32, hdr.naxis1, hdr.naxis2);
-    Ok((rgba, [hdr.naxis1, hdr.naxis2]))
-}
 
 // ======================= Dispatcher formats =======================
 
 fn supported_ext(ext: &str) -> bool {
     matches!(
         ext.to_ascii_lowercase().as_str(),
-        "png" | "jpg" | "jpeg" | "bmp" | "tiff" | "tif" | "webp" | "gif" | "tga" | "ico" | "pnm" | "hdr" | "fits" | "fit" | "fts"
+        "png" | "jpg" | "jpeg" | "bmp" | "tiff" | "tif" | "webp" | "gif" | "tga" | "ico" | "pnm" | "hdr"
     )
 }
 
@@ -526,9 +300,6 @@ fn load_any_rgba8(path: &Path) -> Result<(Vec<u8>, [usize; 2]), String> {
         .map(|s| s.to_ascii_lowercase())
         .unwrap_or_default();
 
-    if matches!(ext.as_str(), "fits" | "fit" | "fts") {
-        return load_fits_rgba8(path);
-    }
     if matches!(ext.as_str(), "tif" | "tiff") {
         return load_tiff_rgba8(path);
     }
@@ -1444,13 +1215,6 @@ struct App {
     slideshow_interval: f32,    // en secondes
     slideshow_timer: f32,       // compteur interne
 
-    //PDF
-    pdf_pages_a: Option<Vec<egui::ColorImage>>,
-    current_page_index_a: usize,
-
-    pdf_pages_b: Option<Vec<egui::ColorImage>>,
-    current_page_index_b: usize,
-
     // Drop différé des textures egui (pour éviter Queue::submit sur texture détruite)
     pending_free: Vec<egui::TextureHandle>,
 
@@ -1554,15 +1318,9 @@ impl Default for App {
             tex_b_cpu: None,
 
             slideshow_mode: false,
-            auto_slideshow: false,
+            auto_slideshow: true,
             slideshow_interval: 5.0,
             slideshow_timer: 0.0,
-
-            pdf_pages_a: None,
-            current_page_index_a: 0,
-
-            pdf_pages_b: None,
-            current_page_index_b: 0,
 
             pending_free: Vec::new(),
 
@@ -1882,66 +1640,16 @@ impl App {
             .map(|s| s.to_ascii_lowercase())
             .unwrap_or_default();
 
-        // 🆕 CAS SPÉCIAL : PDF
-        if ext == "pdf" {
-            match load_pdf_as_images(p.to_str().unwrap()) {
-                Ok(images) => {
-                    if images.is_empty() {
-                        return Err("PDF vide ou non lisible".to_string());
-                    }
-                    // garde toutes les pages
-                    self.pdf_pages_a = Some(images);
-                    self.current_page_index_a = 0;
-
-                    // prend la première pour initialiser comme une image normale
-                    let first = &self.pdf_pages_a.as_ref().unwrap()[0];
-
-                    // vérif GPU budget
-                    self.validate_gpu_budget(first.size[0] as u32, first.size[1] as u32)?;
-
-                    // stockage CPU
-                    self.size_a = first.size;
-                    self.orig_a = Some(std::sync::Arc::new(first.as_raw().to_vec()));
-                    self.path_a = Some(p);
-
-                    // upload GPU
-                    let opts = if self.linear_filter { 
-                        egui::TextureOptions::LINEAR 
-                    } else { 
-                        egui::TextureOptions::NEAREST 
-                    };
-                    let tex = ctx.load_texture("imgA_cpu", first.clone(), opts);
-                    if let Some(old) = self.tex_a_cpu.replace(tex) {
-                        self.pending_free.push(old);
-                    }
-
-                    // marquages UI
-                    self.hist_dirty = true;
-                    self.request_center = true;
-                    self.compare_center_uv = [0.5, 0.5];
-
-                    return Ok(()); // 🚪 on sort ici (pas de pipeline image classique)
-                }
-                Err(e) => return Err(format!("Erreur PDF: {e}")),
-            }
-        }
-
-        // ---- RESET PDF ----
-        self.pdf_pages_a = None;
-        self.current_page_index_a = 0;
-
-        // --- Hors PDF ---
+        // --- Cas général ---
         let (w0, h0) = if matches!(ext.as_str(), "tif" | "tiff") {
             peek_tiff_dims(&p).map_err(|e| e.to_string())?
-        } else if matches!(ext.as_str(), "fits" | "fit" | "fts") {
-            peek_fits_dims(&p).map_err(|e| e.to_string())?
         } else {
             image::image_dimensions(&p).map_err(|e| e.to_string())?
         };
 
         let (tw, th, maybe_f) = self.decide_load_size(w0, h0)?;
 
-        // 2) décodage générique en RGBA8 (TIFF/FITS/Autres)
+        // 2) décodage générique en RGBA8 (TIFF/Autres)
         let (mut data, dims) = load_any_rgba8(&p)?;
         let (w, h) = (dims[0] as u32, dims[1] as u32);
 
@@ -1992,65 +1700,16 @@ impl App {
             .map(|s| s.to_ascii_lowercase())
             .unwrap_or_default();
 
-        // 🆕 CAS SPÉCIAL : PDF
-        if ext == "pdf" {
-            match load_pdf_as_images(p.to_str().unwrap()) {
-                Ok(images) => {
-                    if images.is_empty() {
-                        return Err("PDF vide ou non lisible".to_string());
-                    }
-                    // garde toutes les pages
-                    self.pdf_pages_b = Some(images);
-                    self.current_page_index_b = 0;
-
-                    // prend la première pour initialiser comme une image normale
-                    let first = &self.pdf_pages_b.as_ref().unwrap()[0];
-
-                    // vérif GPU budget
-                    self.validate_gpu_budget(first.size[0] as u32, first.size[1] as u32)?;
-
-                    // stockage CPU
-                    self.size_b = first.size;
-                    self.orig_b = Some(std::sync::Arc::new(first.as_raw().to_vec()));
-                    self.path_b = Some(p);
-
-                    // upload GPU
-                    let opts = if self.linear_filter { 
-                        egui::TextureOptions::LINEAR 
-                    } else { 
-                        egui::TextureOptions::NEAREST 
-                    };
-                    let tex = ctx.load_texture("imgA_cpu", first.clone(), opts);
-                    if let Some(old) = self.tex_a_cpu.replace(tex) {
-                        self.pending_free.push(old);
-                    }
-
-                    // marquages UI
-                    self.hist_dirty = true;
-                    self.request_center = true;
-                    self.compare_center_uv = [0.5, 0.5];
-
-                    return Ok(()); // 🚪 on sort ici (pas de pipeline image classique)
-                }
-                Err(e) => return Err(format!("Erreur PDF: {e}")),
-            }
-        }
-        // ---- RESET PDF ----
-        self.pdf_pages_b = None;
-        self.current_page_index_b = 0;
-
-        // ---- CAS IMAGE CLASSIQUE (copie de ta logique) ----
+        // ---- CAS IMAGE CLASSIQUE  ----
         let (w0, h0) = if matches!(ext.as_str(), "tif" | "tiff") {
             peek_tiff_dims(&p).map_err(|e| e.to_string())?
-        } else if matches!(ext.as_str(), "fits" | "fit" | "fts") {
-            peek_fits_dims(&p).map_err(|e| e.to_string())?
         } else {
             image::image_dimensions(&p).map_err(|e| e.to_string())?
         };
         
         let (tw, th, maybe_f) = self.decide_load_size(w0, h0)?;
 
-        // 2) décodage générique en RGBA8 (TIFF/FITS/Autres)
+        // 2) décodage générique en RGBA8 (TIFF/Autres)
         let (mut data, dims) = load_any_rgba8(&p)?;
         let (w, h) = (dims[0] as u32, dims[1] as u32);
 
@@ -2302,13 +1961,11 @@ impl eframe::App for App {
                     egui::Frame::window(&ctx.style()).show(ui, |ui| {
                         ui.heading("🖼 Visua – Image Viewer");
                         ui.separator();
-                        ui.label("Version 1.1.0");
+                        ui.label("Version 1.2.0");
                         ui.label("Author: AdrienLor");
                         ui.separator();
                         ui.label("Formats :");
                         ui.label("- PNG, JPG, BMP, WEBP, TGA, GIF, HDR, TIFF (incl. 32-bit float)");
-                        ui.label("- FITS (lecteur Rust pur)");
-                        ui.label("- PDF (via Pdfium)");
                         ui.separator();
                         ui.label("Help – Slideshow controls:");
                         ui.label("• F11 : Enter slideshow fullscreen");
@@ -2331,10 +1988,10 @@ impl eframe::App for App {
                 {
                     if let Some(path) = FileDialog::new()
                         .add_filter(
-                            "Images et PDF",
+                            "Images",
                             &[
                                 "png", "jpg", "jpeg", "bmp", "tiff", "tif", "webp", "gif", "tga",
-                                "ico", "pnm", "hdr", "fits", "fit", "fts", "pdf",
+                                "ico", "pnm", "hdr"
                             ],
                         )
                         .pick_file()
@@ -2347,10 +2004,10 @@ impl eframe::App for App {
                 if ui.button("Ouvrir B…").clicked() {
                     if let Some(path) = FileDialog::new()
                         .add_filter(
-                            "Images et PDF",
+                            "Images",
                             &[
                                 "png", "jpg", "jpeg", "bmp", "tiff", "tif", "webp", "gif", "tga",
-                                "ico", "pnm", "hdr", "fits", "fit", "fts", "pdf",
+                                "ico", "pnm", "hdr"
                             ],
                         )
                         .pick_file()
@@ -2367,138 +2024,42 @@ impl eframe::App for App {
             let disable_a = self.filelist_a.len() <= 1;
             let disable_b = self.filelist_b.len() <= 1;
 
-            // ---- Navigation pour A ----
-            if self.pdf_pages_a.is_some() {
-                // Navigation PDF A
-                let pages = self.pdf_pages_a.as_ref().unwrap();
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(self.current_page_index_a > 0, egui::Button::new("A ◀ P. préc."))
-                        .clicked()
-                    {
-                        self.current_page_index_a -= 1;
-                        let page = &pages[self.current_page_index_a];
-
-                        // met à jour image CPU
-                        self.size_a = page.size;
-                        self.orig_a = Some(std::sync::Arc::new(page.as_raw().to_vec()));
-
-                        // re-upload GPU
-                        let opts = if self.linear_filter { egui::TextureOptions::LINEAR } else { egui::TextureOptions::NEAREST };
-                        let tex = ctx.load_texture("imgA_cpu", page.clone(), opts);
-                        if let Some(old) = self.tex_a_cpu.replace(tex) {
-                            self.pending_free.push(old);
-                        }
-
-                        self.hist_dirty = true;
-                        self.request_center = true;
-                    }
-
-                    if ui
-                        .add_enabled(self.current_page_index_a + 1 < pages.len(), egui::Button::new("A P. suiv. ▶"))
-                        .clicked()
-                    {
-                        self.current_page_index_a += 1;
-                        let page = &pages[self.current_page_index_a];
-
-                        self.size_a = page.size;
-                        self.orig_a = Some(std::sync::Arc::new(page.as_raw().to_vec()));
-
-                        let opts = if self.linear_filter { egui::TextureOptions::LINEAR } else { egui::TextureOptions::NEAREST };
-                        let tex = ctx.load_texture("imgA_cpu", page.clone(), opts);
-                        if let Some(old) = self.tex_a_cpu.replace(tex) {
-                            self.pending_free.push(old);
-                        }
-
-                        self.hist_dirty = true;
-                        self.request_center = true;
-                    }
-
-                    ui.label(format!("Page {}/{}", self.current_page_index_a + 1, pages.len()));
-                });
-            } else {
-                // Navigation dossier A (comme avant)
-                if ui
-                    .add_enabled(!disable_a, egui::Button::new("A ◀ Préc."))
-                    .clicked()
-                {
-                    let _ = self.navigate_a(ctx, -1);
-                }
-                if ui
-                    .add_enabled(!disable_a, egui::Button::new("A Suiv. ▶"))
-                    .clicked()
-                {
-                    let _ = self.navigate_a(ctx, 1);
-                }
+            
+            // Navigation dossier A
+            if ui
+                .add_enabled(!disable_a, egui::Button::new("A ◀ Préc."))
+                .clicked()
+            {
+                let _ = self.navigate_a(ctx, -1);
             }
+            if ui
+                .add_enabled(!disable_a, egui::Button::new("A Suiv. ▶"))
+                .clicked()
+            {
+                let _ = self.navigate_a(ctx, 1);
+            }
+        
 
-            // ---- Navigation pour B (si compare_enabled et PDF B chargé) ----
+            // ---- Navigation pour B (si compare_enabled ) ----
             if self.compare_enabled {
-                if let Some(pages) = &self.pdf_pages_b {
-                    ui.horizontal(|ui| {
-                        if ui
-                        .add_enabled(self.current_page_index_b > 0, egui::Button::new("B ◀ P. préc."))
-                        .clicked()
-                    {
-                        self.current_page_index_b -= 1;
-                        let page = &pages[self.current_page_index_b];
-
-                        // maj buffer CPU
-                        self.size_b = page.size;
-                        self.orig_b = Some(std::sync::Arc::new(page.as_raw().to_vec()));
-
-                        // re-upload GPU
-                        let opts = if self.linear_filter { egui::TextureOptions::LINEAR } else { egui::TextureOptions::NEAREST };
-                        let tex = ctx.load_texture("imgB_cpu", page.clone(), opts);
-                        if let Some(old) = self.tex_b_cpu.replace(tex) {
-                            self.pending_free.push(old);
-                        }
-
-                        self.hist_dirty = true;
-                        self.request_center = true;
-                    }
-
-                    if ui
-                        .add_enabled(self.current_page_index_b + 1 < pages.len(), egui::Button::new("B P. suiv. ▶"))
-                        .clicked()
-                    {
-                        self.current_page_index_b += 1;
-                        let page = &pages[self.current_page_index_b];
-
-                        self.size_b = page.size;
-                        self.orig_b = Some(std::sync::Arc::new(page.as_raw().to_vec()));
-
-                        let opts = if self.linear_filter { egui::TextureOptions::LINEAR } else { egui::TextureOptions::NEAREST };
-                        let tex = ctx.load_texture("imgB_cpu", page.clone(), opts);
-                        if let Some(old) = self.tex_b_cpu.replace(tex) {
-                            self.pending_free.push(old);
-                        }
-
-                        self.hist_dirty = true;
-                        self.request_center = true;
-                    }
-
-                    ui.label(format!("Page {}/{}", self.current_page_index_b + 1, pages.len()));
-                });
-                } else {
-                    // Navigation dossier B (comme avant)
-                    if ui
-                        .add_enabled(!disable_b, egui::Button::new("B ◀ Préc."))
-                        .clicked()
-                    {
-                        let _ = self.navigate_b(ctx, -1);
-                    }
-                    if ui
-                        .add_enabled(!disable_b, egui::Button::new("B Suiv. ▶"))
-                        .clicked()
-                    {
-                        let _ = self.navigate_b(ctx, 1);
-                    }
+                // Navigation dossier B (comme avant)
+                if ui
+                    .add_enabled(!disable_b, egui::Button::new("B ◀ Préc."))
+                    .clicked()
+                {
+                    let _ = self.navigate_b(ctx, -1);
+                }
+                if ui
+                    .add_enabled(!disable_b, egui::Button::new("B Suiv. ▶"))
+                    .clicked()
+                {
+                    let _ = self.navigate_b(ctx, 1);
                 }
             }
+            
 
             //Bouton Diaporama et options connexes
-            if !self.compare_enabled && self.orig_a.is_some() && !self.pdf_pages_a.is_some() {
+            if !self.compare_enabled && self.orig_a.is_some() {
                 ui.separator();
                 if ui.button("🎞 Diaporama").clicked() {
                     self.slideshow_mode = true;
@@ -2751,7 +2312,7 @@ impl eframe::App for App {
                     }
                 }
 
-                if !self.compare_enabled && self.pdf_pages_a.is_none() && self.orig_a.is_some() {
+                if !self.compare_enabled && self.orig_a.is_some() {
                     ui.separator(); 
                     ui.heading("Tri");
                     ui.add_space(6.0);
