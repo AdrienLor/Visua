@@ -2935,8 +2935,8 @@ fn main() -> eframe::Result<()> {
     let native_opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Visua")
-            .with_inner_size(egui::vec2(1440.0, 800.0))
-            .with_min_inner_size(egui::vec2(1440.0, 800.0))       
+            .with_inner_size(egui::vec2(1440.0, 820.0))
+            .with_min_inner_size(egui::vec2(1440.0, 820.0))       
             .with_icon(icon),
         centered: true, // centrer à l’ouverture
         ..Default::default()
