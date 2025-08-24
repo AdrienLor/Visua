@@ -5,7 +5,7 @@ winres = "0.1"
 [package]
 build = "build.rs"
 name = "visua"
-version = "1.1.0"
+version = "1.2.0"
 authors = ["AdrienLor"]
 edition = "2024"
 
@@ -16,5 +16,3 @@ image  = { version = "0.25", default-features = false, features = ["png","jpeg",
 tiff   = "0.9"
 rfd    = "0.14"
 bytemuck = { version = "1.15", features = ["derive"] }
-pdfium-render = { version = "0.8.35", features = ["image_latest", "thread_safe"] }
-

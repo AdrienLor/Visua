@@ -1,7 +1,5 @@
 fn main() {
-
-    println!("cargo:rerun-if-changed=assets/pdfium.dll");
-    
+ 
      #[cfg(windows)]
     {
         use std::path::Path;
