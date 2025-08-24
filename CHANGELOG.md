@@ -20,6 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.2.0] – 2025-08-24
+
+### Changed
+- 🧹 **Simplified core**: removed support for PDF and FITS formats to keep Visua lightweight and focused on image viewing.  
+- Image loading pipeline now centered on standard formats + advanced TIFF handling (incl. 16/32-bit float).  
+- Updated README and documentation to reflect the new scope.  
+
+---
+
 ## [1.1.0] – 2025-08-21
 
 ### Added
