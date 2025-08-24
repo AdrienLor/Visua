@@ -2189,14 +2189,14 @@ impl eframe::App for App {
                 ui.heading("Affichage");
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Fit (F)").clicked() || ui.input(|i| i.key_pressed(egui::Key::F)) {
+                    if ui.button("Fit").clicked() {
                         self.fit_allow_upscale = true;
                         self.cmd_fit();
                     }
                     if ui.button("Centrer").clicked() {
                         self.cmd_center();
                     }
-                    if ui.button("1:1 (1)").clicked() || ui.input(|i| i.key_pressed(egui::Key::Num1)) {
+                    if ui.button("1:1").clicked() {
                         self.cmd_one_to_one();
                     }
                 });
