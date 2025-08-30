@@ -1329,7 +1329,7 @@ impl Default for App {
             filelist_b: Vec::new(),
             idx_b: 0,
 
-            show_options: true,
+            show_options: false,
 
             show_about: false,
 
@@ -1961,7 +1961,7 @@ impl eframe::App for App {
                     egui::Frame::window(&ctx.style()).show(ui, |ui| {
                         ui.heading("🖼 Visua – Image Viewer");
                         ui.separator();
-                        ui.label("Version 1.2.0");
+                        ui.label(env!("CARGO_PKG_VERSION"));
                         ui.label("Author: AdrienLor");
                         ui.separator();
                         ui.label("Formats :");
@@ -2176,6 +2176,22 @@ impl eframe::App for App {
                     ).clicked() {
                         self.show_about = true;
                     }
+                    
+                ui.separator();
+                ui.horizontal(|ui| {
+
+                    if ui.button("[+]").clicked() {
+                        self.cmd_center();
+                    }
+                    if ui.button("1:1").clicked() {
+                        self.cmd_one_to_one();
+                    }
+                    if ui.button("Fit").clicked() {
+                        self.fit_allow_upscale = true;
+                        self.cmd_fit();
+                    }
+                });
+
 
 
                 });          
@@ -2188,18 +2204,6 @@ impl eframe::App for App {
                 ui.add_space(4.0);
                 ui.heading("Affichage");
                 ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Fit").clicked() {
-                        self.fit_allow_upscale = true;
-                        self.cmd_fit();
-                    }
-                    if ui.button("Centrer").clicked() {
-                        self.cmd_center();
-                    }
-                    if ui.button("1:1").clicked() {
-                        self.cmd_one_to_one();
-                    }
-                });
                 // if ui.button("Reset (R)").clicked() || ui.input(|i| i.key_pressed(egui::Key::R)) {
                 //     self.request_fit = true;
                 //     self.fit_allow_upscale = false; // reset fit            
