@@ -1983,7 +1983,7 @@ impl eframe::App for App {
         // Barre du haut — actions
         egui::TopBottomPanel::top("menu").min_height(23.0).show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Ouvrir A… (Ctrl+O)").clicked()
+                if ui.button("Ouvrir A").clicked()
                     || ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::O))
                 {
                     if let Some(path) = FileDialog::new()
@@ -2001,7 +2001,7 @@ impl eframe::App for App {
                 }
                 
             if self.orig_a.is_some(){
-                if ui.button("Ouvrir B…").clicked() {
+                if ui.button("Ouvrir B").clicked() {
                     if let Some(path) = FileDialog::new()
                         .add_filter(
                             "Images",
@@ -2815,7 +2815,7 @@ impl eframe::App for App {
                 painter.text(
                     panel_rect.center(),
                     egui::Align2::CENTER_CENTER,
-                    "Ctrl+O pour ouvrir l'image A — puis B pour activer la comparaison",
+                    "Ouvrir l'image A — puis B pour activer la comparaison",
                     egui::TextStyle::Heading.resolve(ui.style()),
                     egui::Color32::from_gray(180),
                 );
