@@ -77,10 +77,9 @@ struct Loader {
     rx: Receiver<JobResult>,
 }
 
-fn start_loader(num_threads: usize) -> Loader {
+fn start_loader(_num_threads: usize) -> Loader {
     let (tx_job, rx_job) = channel::<Job>();
     let (tx_res, rx_res) = channel::<JobResult>();
-
     
         thread::spawn(move || {
             while let Ok(job) = rx_job.recv() {
@@ -1402,6 +1401,16 @@ struct App {
     compare_spacing: f32, //espace entre les images (horz)
     compare_vertical_offset : f32, //espace entre les images (vert) avec cisaillement de A par rapport à B
 
+    link_views: bool,
+
+    show_split_divider: bool,
+
+    // États de vue individuels (utilisés si link_views == false)
+    zoom_a: f32,
+    zoom_b: f32,
+    offset_a: Vec2,  // en points, repère rect local
+    offset_b: Vec2,
+
     pub max_tex_side_device: u32,
 
     //status message
@@ -1504,6 +1513,15 @@ impl Default for App {
             compare_spacing: 0.0,
             compare_vertical_offset : 0.0,
 
+            link_views: true,
+
+            show_split_divider: true,
+
+            zoom_a: 1.0,
+            zoom_b: 1.0,
+            offset_a: Vec2::ZERO,
+            offset_b: Vec2::ZERO,
+
             max_tex_side_device: MAX_TEX_SIDE_FALLBACK,
 
             status_message: None,
@@ -1550,7 +1568,7 @@ impl App {
 
         if self.bin_folder_name.is_empty() {
             self.set_status_message(
-                "⚠ Sélectionnez ou créez un sous-dossier avant de trier.",
+                "⚠ Select or create a subfolder before sorting.",
                 egui::Color32::RED,
                 3.0,
             );
@@ -1863,8 +1881,10 @@ impl App {
     }
 
 
-    fn load_image_a(&mut self, ctx: &egui::Context, p: PathBuf) -> Result<(), String> {
+    fn load_image_a(&mut self, _ctx: &egui::Context, p: PathBuf) -> Result<(), String> {
         self.set_filelist_a(&p);
+        self.idx_a = self.filelist_a.iter().position(|x| x == &p).unwrap_or(0);
+        self.path_a = Some(p.clone());
         self.request_fit = true;
         {
             self.set_filelist_a(&p);
@@ -1875,8 +1895,10 @@ impl App {
         }
     }
 
-    fn load_image_b(&mut self, ctx: &egui::Context, p: PathBuf) -> Result<(), String> {
+    fn load_image_b(&mut self, _ctx: &egui::Context, p: PathBuf) -> Result<(), String> {
         self.set_filelist_b(&p);
+        self.idx_b = self.filelist_b.iter().position(|x| x == &p).unwrap_or(0);
+        self.path_b = Some(p.clone());
         self.request_fit = true;
         {
             self.set_filelist_b(&p);
@@ -1900,6 +1922,8 @@ impl App {
         }
         self.idx_a = ni as usize;
         let path = self.filelist_a[self.idx_a].clone();
+        self.path_a = Some(path.clone());
+
         self.load_image_a_only(ctx, path)
     }
 
@@ -1916,6 +1940,8 @@ impl App {
         }
         self.idx_b = ni as usize;
         let path = self.filelist_b[self.idx_b].clone();
+        self.path_b = Some(path.clone());
+
         self.load_image_b_only(ctx, path)
     }
 
@@ -1985,6 +2011,7 @@ impl App {
         }
 
         // 2) Reset état de navigation/selection B
+        self.path_b = None;
         self.filelist_b = Vec::new();
         self.idx_b = 0;
         self.last_req_b = None;
@@ -2324,7 +2351,7 @@ impl eframe::App for App {
 
                 ui.add(
                 egui::Slider::new(&mut self.slideshow_interval, 1.0..=30.0)
-                    .text("Delay")
+                    .text("sec.")
                 );
             }
     
@@ -2339,27 +2366,58 @@ impl eframe::App for App {
             // --- PATCH: mémorise l'état avant interaction ---
             let was_compare_enabled = self.compare_enabled;
             let was_mode = self.compare_mode;
+            let was_link = self.link_views;
             
             if self.compare_enabled && self.orig_a.is_some() && self.orig_b.is_some() {
-                ui.separator();
+
+                
                 ui.label("Mode :");
-                ui.selectable_value(&mut self.compare_mode, CompareMode::Split, "Split");
-                ui.selectable_value(&mut self.compare_mode, CompareMode::Blink, "Blink");
-                ui.selectable_value(&mut self.compare_mode, CompareMode::Diff,  "Diff");
+    
+                    ui.selectable_value(&mut self.compare_mode, CompareMode::Split, "Split");
+                    ui.selectable_value(&mut self.compare_mode, CompareMode::Blink, "Blink");
+                    ui.selectable_value(&mut self.compare_mode, CompareMode::Diff,  "Diff");
+               
                 ui.separator();
+
+                if self.compare_mode==CompareMode::Split { 
+                    ui.checkbox(&mut self.show_split_divider, "Div.");
+                    ui.checkbox(&mut self.link_views, "Link");
+                    ui.separator();
+                }
+
+                // si changement d'état Link → initialise proprement les paramètres
+                if self.link_views != was_link {
+                    if self.link_views {
+                        // On repasse en mode lié : unifie le zoom sur la base des deux
+                        let avg = 0.5 * (self.zoom_a + self.zoom_b);
+                        self.zoom = avg.clamp(self.min_zoom, self.max_zoom);
+                        self.offset = Vec2::ZERO;
+                        self.compare_center_uv = [0.5, 0.5];
+                        self.request_center = true;
+                    } else {
+                        // On passe en mode indépendant : duplique les valeurs actuelles
+                        self.zoom_a = self.zoom.clamp(self.min_zoom, self.max_zoom);
+                        self.zoom_b = self.zoom_a;
+                        self.offset_a = Vec2::ZERO;
+                        self.offset_b = Vec2::ZERO;
+                        self.request_center = true;
+                    }
+                }
 
                 match self.compare_mode {
                     CompareMode::Split => {
-                        //ui.add(egui::Slider::new(&mut self.compare_split, 0.0..=1.0).text("Split (A ⇠ B)"));
-                        ui.add(egui::Slider::new(&mut self.compare_spacing, -1.0..=1.0).step_by(0.001).drag_value_speed(0.001).text("Horz."));
-                        ui.add(egui::Slider::new(&mut self.compare_vertical_offset, -1.0..=1.0).step_by(0.001).drag_value_speed(0.001).text("Vert."));
-                        if ui.button("Init.").clicked() {
-                            self.compare_spacing = 0.000;
-                            self.compare_vertical_offset = 0.000;
-                        }             
+                        if self.link_views {
+                            //ui.add(egui::Slider::new(&mut self.compare_split, 0.0..=1.0).text("Split (A ⇠ B)"));
+                            ui.add(egui::Slider::new(&mut self.compare_spacing, -1.0..=1.0).step_by(0.001).drag_value_speed(0.001).text("Horz."));
+                            ui.add(egui::Slider::new(&mut self.compare_vertical_offset, -1.0..=1.0).step_by(0.001).drag_value_speed(0.001).text("Vert."));
+                            if ui.button("Reset").clicked() {
+                                self.compare_spacing = 0.000;
+                                self.compare_vertical_offset = 0.000;
+                            } 
+                        }            
                     }
                     CompareMode::Blink => {
-                        ui.add(egui::Slider::new(&mut self.blink_hz, 0.5..=8.0).text("Vitesse (Hz)").logarithmic(true));
+                        ui.add(egui::Slider::new(&mut self.blink_hz, 0.5..=8.0).text("Hz").logarithmic(true));
                         // --- PATCH: si on vient d'activer Blink, centre l'image ---
                         let blink_just_enabled =
                             self.compare_enabled
@@ -2374,7 +2432,6 @@ impl eframe::App for App {
                         }
                     }
                     CompareMode::Diff => {
-                        ui.label("Affiche |A - B| (après corrections).");
                         let diff_just_enabled =
                             self.compare_enabled
                             && (!was_compare_enabled || was_mode != self.compare_mode)
@@ -2492,19 +2549,19 @@ impl eframe::App for App {
                 // ui.add_space(8.0);
 
                 ui.separator();
-                ui.heading("Ajustements (GPU)");
+                ui.heading("Calibration");
                 ui.add_space(8.0);
                 let (mut b, mut c, mut s, mut g) =
                     (self.brightness, self.contrast, self.saturation, self.gamma);
                 if ui
-                    .add(egui::Slider::new(&mut b, -1.0..=1.0).text("Luminosité").step_by(0.001).drag_value_speed(0.001))
+                    .add(egui::Slider::new(&mut b, -1.0..=1.0).text("Brightness").step_by(0.001).drag_value_speed(0.001))
                     .changed()
                 {
                     self.brightness = b;
                     self.mark_hist_dirty();
                 }
                 if ui
-                    .add(egui::Slider::new(&mut c, 0.0..=2.0).text("Contraste").step_by(0.001).drag_value_speed(0.001))
+                    .add(egui::Slider::new(&mut c, 0.0..=2.0).text("Contrast").step_by(0.001).drag_value_speed(0.001))
                     .changed()
                 {
                     self.contrast = c;
@@ -2526,7 +2583,7 @@ impl eframe::App for App {
                     self.mark_hist_dirty();
                 }
                 ui.add_space(8.0);
-                if ui.button("Réinitialiser réglages").clicked() {
+                if ui.button("Reset").clicked() {
                     self.brightness = 0.0;
                     self.contrast = 1.0;
                     self.saturation = 1.0;
@@ -2536,23 +2593,25 @@ impl eframe::App for App {
                 ui.add_space(8.0);
 
                 ui.separator();
-                ui.heading("Histogramme (A)");
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.radio_value(&mut self.hist_rgb_mode, false, "Luma");
-                    ui.radio_value(&mut self.hist_rgb_mode, true, "RGB");
-                });
-                ui.checkbox(&mut self.log_hist, "Échelle log");
-                ui.add_space(6.0);
-                if self.hist_rgb_mode {
-                    draw_histogram_rgb(ui, &self.hist_r, &self.hist_g, &self.hist_b, 120.0, self.log_hist);
-                } else {
-                    draw_histogram_luma(ui, &self.hist_luma, 120.0, self.log_hist);
+                if self.orig_a.is_some() {
+                    ui.heading("Histogram A");
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.radio_value(&mut self.hist_rgb_mode, false, "Luma");
+                        ui.radio_value(&mut self.hist_rgb_mode, true, "RGB");
+                    });
+                    ui.checkbox(&mut self.log_hist, "Log");
+                    ui.add_space(6.0);
+                    if self.hist_rgb_mode {
+                        draw_histogram_rgb(ui, &self.hist_r, &self.hist_g, &self.hist_b, 120.0, self.log_hist);
+                    } else {
+                        draw_histogram_luma(ui, &self.hist_luma, 120.0, self.log_hist);
+                    }
                 }
                 // Histogramme (B) si comparaison active et image B chargée
                 if self.compare_enabled && self.orig_b.is_some() {
                     ui.add_space(6.0);
-                    ui.heading("Histogramme (B)");
+                    ui.heading("Histogram B");
                     if self.hist_rgb_mode {
                         draw_histogram_rgb(ui, &self.hist2_r, &self.hist2_g, &self.hist2_b, 120.0, self.log_hist);
                     } else {
@@ -2562,18 +2621,16 @@ impl eframe::App for App {
 
                 if !self.compare_enabled && self.orig_a.is_some() {
                     ui.separator(); 
-                    ui.heading("Tri");
+                    ui.heading("Sorting");
                     ui.add_space(6.0);
 
                     // Toujours rafraîchir la liste
                     self.refresh_subfolders();
 
-                    ui.label("Dossier de tri :");
-
-                    egui::ComboBox::from_label("Sous-dossiers")
+                    egui::ComboBox::from_label("Subfolders")
                         .selected_text(
                             if self.bin_folder_name.is_empty() {
-                                "Sélectionner…"
+                                "Select…"
                             } else {
                                 &self.bin_folder_name
                             }
@@ -2581,7 +2638,7 @@ impl eframe::App for App {
                         .show_ui(ui, |ui| {
                             if self.subfolders.is_empty() {
                                 // Aucun sous-dossier → forcer la création
-                                ui.label("⚠ Aucun sous-dossier disponible.");
+                                ui.label("⚠ No subfolders available");
                             } else {
                                 // Sous-dossiers existants
                                 for folder in &self.subfolders {
@@ -2592,7 +2649,7 @@ impl eframe::App for App {
                             }
 
                             ui.separator();
-                            if ui.button("➕ Créer un nouveau dossier…").clicked() {
+                            if ui.button("➕ Create new subfolder…").clicked() {
                                 self.show_new_folder_dialog = true;
                                 self.new_folder_input.clear();
                             }
@@ -2604,7 +2661,7 @@ impl eframe::App for App {
                     if ui
                         .add(
                             egui::Button::new(
-                                RichText::new("Trier (del)").color(egui::Color32::LIGHT_GRAY)
+                                RichText::new("Sort").color(egui::Color32::LIGHT_GRAY)
                             )
                             .fill(egui::Color32::from_rgb(231, 52, 21))
                         )                        
@@ -2643,10 +2700,10 @@ impl eframe::App for App {
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
                     egui::Frame::window(&ctx.style()).show(ui, |ui| {
-                        ui.heading("Créer un dossier");
+                        ui.heading("New Subfolder");
                         ui.separator();
 
-                        ui.label("Nom du nouveau dossier (A–Z, a–z, 0–9, _ , -) :");
+                        ui.label("Subfolder name (A–Z, a–z, 0–9, _ , -) :");
                         let resp = ui.text_edit_singleline(&mut self.new_folder_input);
 
                         if resp.changed() {
@@ -2657,7 +2714,7 @@ impl eframe::App for App {
                         }
 
                         ui.horizontal(|ui| {
-                            if ui.button("Créer").clicked() && !self.new_folder_input.is_empty() {
+                            if ui.button("Create").clicked() && !self.new_folder_input.is_empty() {
                                 if let Some(img_path) = &self.path_a {
                                     if let Some(parent) = img_path.parent() {
                                         let new_dir = parent.join(&self.new_folder_input);
@@ -2672,7 +2729,7 @@ impl eframe::App for App {
                                 self.show_new_folder_dialog = false;
                             }
 
-                            if ui.button("Annuler").clicked() {
+                            if ui.button("Cancel").clicked() {
                                 self.show_new_folder_dialog = false;
                             }
                         });
@@ -2710,39 +2767,135 @@ impl eframe::App for App {
             if self.compare_enabled {
                 match self.compare_mode {
                     CompareMode::Split => {
-                        if self.request_fit {
-                            let mut scales: Vec<f32> = vec![];
-                            if self.size_a != [0, 0] {
-                                scales.push((left_rect.width()  / self.size_a[0] as f32)
-                                    .min(left_rect.height() / self.size_a[1] as f32));
-                            }
-                            if self.size_b != [0, 0] {
-                                scales.push((right_rect.width() / self.size_b[0] as f32)
-                                    .min(right_rect.height() / self.size_b[1] as f32));
-                            }
-                            if let Some(mins) = scales.into_iter().reduce(f32::min) {
-                                let fit = mins.min(1.0); 
-                                self.zoom = fit.max(0.05);
-                                self.min_zoom = (self.zoom * 0.001).max(0.005);
-                            }
-                            self.compare_center_uv = [0.5, 0.5];
-                            self.request_fit = false;
-                        }
-                        if self.request_one_to_one {
-                            
-                            self.zoom = 1.0;
-                            // recentrer (à adapter à tes champs : center UV partagé ou par-slot)
-                            self.compare_center_uv = [0.5, 0.5];
-                            // self.offset = egui::vec2(0.0, 0.0);  // si tu as un pan en pixels
+                        if !self.link_views {
+                            // ---------- Link OFF : contrôles indépendants A / B ----------
 
-                            self.request_fit = false;
-                            self.fit_allow_upscale = false;
+                            // FIT par pane
+                            if self.request_fit {
+                                // A
+                                if self.size_a != [0, 0] {
+                                    let fit_a = (left_rect.width()  / self.size_a[0] as f32)
+                                        .min(left_rect.height() / self.size_a[1] as f32);
+                                    let target_a = if self.fit_allow_upscale { fit_a } else { fit_a.min(1.0) };
+                                    self.zoom_a = target_a.max(0.05);
 
-                            self.request_one_to_one = false;
-                        }
-                        if self.request_center {
-                            self.compare_center_uv = [0.5, 0.5];
-                            self.request_center = false;
+                                    let draw_a = egui::Vec2::new(
+                                        self.size_a[0] as f32 * self.zoom_a,
+                                        self.size_a[1] as f32 * self.zoom_a,
+                                    );
+                                    self.offset_a = 0.5 * (left_rect.size() - draw_a);
+                                } else {
+                                    self.zoom_a = 1.0;
+                                    self.offset_a = egui::Vec2::ZERO;
+                                }
+
+                                // B
+                                if self.size_b != [0, 0] {
+                                    let fit_b = (right_rect.width()  / self.size_b[0] as f32)
+                                        .min(right_rect.height() / self.size_b[1] as f32);
+                                    let target_b = if self.fit_allow_upscale { fit_b } else { fit_b.min(1.0) };
+                                    self.zoom_b = target_b.max(0.05);
+
+                                    let draw_b = egui::Vec2::new(
+                                        self.size_b[0] as f32 * self.zoom_b,
+                                        self.size_b[1] as f32 * self.zoom_b,
+                                    );
+                                    self.offset_b = 0.5 * (right_rect.size() - draw_b);
+                                } else {
+                                    self.zoom_b = 1.0;
+                                    self.offset_b = egui::Vec2::ZERO;
+                                }
+
+                                // min_zoom cohérent avec les deux
+                                self.min_zoom = (self.zoom_a.min(self.zoom_b) * 0.001).max(0.005);
+
+                                self.request_fit = false;
+                                ctx.request_repaint();
+                            }
+
+                           // --- 1:1 indépendant (Link OFF) ---
+                            if self.request_one_to_one {
+                                self.zoom_a = 1.0;
+                                self.zoom_b = 1.0;
+
+                                // centre visuel dans chaque sous-rect
+                                let draw_a = egui::Vec2::new(self.size_a[0] as f32 * self.zoom_a, self.size_a[1] as f32 * self.zoom_a);
+                                let draw_b = egui::Vec2::new(self.size_b[0] as f32 * self.zoom_b, self.size_b[1] as f32 * self.zoom_b);
+
+                                self.offset_a = 0.5 * (left_rect.size()  - draw_a);
+                                self.offset_b = 0.5 * (right_rect.size() - draw_b);
+
+                                // sécurité si une image manque
+                                if self.size_a == [0,0] { self.offset_a = egui::Vec2::ZERO; }
+                                if self.size_b == [0,0] { self.offset_b = egui::Vec2::ZERO; }
+
+                                // ne pas enclencher de fit derrière :
+                                self.request_fit = false;
+                                self.fit_allow_upscale = false;
+                                self.request_one_to_one = false;
+
+                                ctx.request_repaint();
+                            }
+
+                            // Center indépendant
+                            if self.request_center {
+                                if self.size_a != [0, 0] {
+                                    let draw_a = egui::Vec2::new(
+                                        self.size_a[0] as f32 * self.zoom_a,
+                                        self.size_a[1] as f32 * self.zoom_a,
+                                    );
+                                    self.offset_a = 0.5 * (left_rect.size() - draw_a);
+                                } else {
+                                    self.offset_a = egui::Vec2::ZERO;
+                                }
+
+                                if self.size_b != [0, 0] {
+                                    let draw_b = egui::Vec2::new(
+                                        self.size_b[0] as f32 * self.zoom_b,
+                                        self.size_b[1] as f32 * self.zoom_b,
+                                    );
+                                    self.offset_b = 0.5 * (right_rect.size() - draw_b);
+                                } else {
+                                    self.offset_b = egui::Vec2::ZERO;
+                                }
+
+                                self.request_center = false;
+                                ctx.request_repaint();
+                            }
+
+                        } else {
+                            // ---------- Link ON : ton comportement actuel (partagé) ----------
+                            if self.request_fit {
+                                let mut scales: Vec<f32> = vec![];
+                                if self.size_a != [0, 0] {
+                                    scales.push((left_rect.width()  / self.size_a[0] as f32)
+                                        .min(left_rect.height() / self.size_a[1] as f32));
+                                }
+                                if self.size_b != [0, 0] {
+                                    scales.push((right_rect.width() / self.size_b[0] as f32)
+                                        .min(right_rect.height() / self.size_b[1] as f32));
+                                }
+                                if let Some(mins) = scales.into_iter().reduce(f32::min) {
+                                    let target = if self.fit_allow_upscale { mins } else { mins.min(1.0) };
+                                    self.zoom = target.max(0.05);
+                                    self.min_zoom = (self.zoom * 0.001).max(0.005);
+                                }
+                                self.compare_center_uv = [0.5, 0.5];
+                                self.request_fit = false;
+                            }
+
+                            if self.request_one_to_one {
+                                self.zoom = 1.0;
+                                self.compare_center_uv = [0.5, 0.5];
+                                self.request_fit = false;
+                                self.fit_allow_upscale = false;
+                                self.request_one_to_one = false;
+                            }
+
+                            if self.request_center {
+                                self.compare_center_uv = [0.5, 0.5];
+                                self.request_center = false;
+                            }
                         }
                     }
                     // Blink et Diff: fit comme en mode normal, sur tout le panel
@@ -2991,26 +3144,125 @@ impl eframe::App for App {
             if self.compare_enabled && self.orig_a.is_some() && self.orig_b.is_some() {
                 match self.compare_mode {
                     CompareMode::Split => {
+
                         // A à gauche
                         if let Some(pa) = &self.orig_a {
                             let mut p = build_params_compare(self.size_a);
-                            p.off_x = -self.compare_spacing * left_rect.width() * 0.5;  // A horz spacing
-                            p.off_y = -self.compare_vertical_offset * left_rect.height() * 0.5; // A vert spacing
+                            if self.link_views {
+                                // 🔗 Mode LIÉ : (comportement actuel)
+                                p.off_x = -self.compare_spacing * left_rect.width() * 0.5;   // spacing horizontal A
+                                p.off_y = -self.compare_vertical_offset * left_rect.height() * 0.5; // spacing vertical A
+                                // p.zoom = self.zoom; p.center_u/v = self.compare_center_uv (déjà posés dans build_params_compare)
+                            } else {
+                                // 🔓 Mode INDÉPENDANT : pas de center_uv partagé; utiliser zoom_a/offset_a
+                                p.center_u = -1.0;
+                                p.center_v = -1.0;
+                                p.zoom = self.zoom_a;
+                                p.off_x = self.offset_a.x - self.compare_spacing * left_rect.width() * 0.5;
+                                p.off_y = self.offset_a.y - self.compare_vertical_offset * left_rect.height() * 0.5;
+                            }
                             let cb = make_postprocess_paint_callback(left_rect, Arc::clone(pa), self.size_a, self.linear_filter, p);
                             ui.painter().add(cb);
                         }
+
                         // B à droite
-                        if let Some(pb) = &self.orig_b {
+                         if let Some(pb) = &self.orig_b {
                             let mut p = build_params_compare(self.size_b);
-                            p.off_x =  self.compare_spacing * right_rect.width() * 0.5; // B horz spacing
-                            p.off_y = self.compare_vertical_offset * right_rect.height() * 0.5; // B vertical spacing
+                            if self.link_views {
+                                // 🔗 Mode LIÉ : (comportement actuel)
+                                p.off_x =  self.compare_spacing * right_rect.width() * 0.5;   // spacing horizontal B
+                                p.off_y =  self.compare_vertical_offset * right_rect.height() * 0.5; // spacing vertical B
+                                // p.zoom = self.zoom; p.center_u/v = self.compare_center_uv
+                            } else {
+                                // 🔓 Mode INDÉPENDANT : zoom_b/offset_b
+                                p.center_u = -1.0;
+                                p.center_v = -1.0;
+                                p.zoom = self.zoom_b;
+                                p.off_x = self.offset_b.x + self.compare_spacing * right_rect.width() * 0.5;
+                                p.off_y = self.offset_b.y + self.compare_vertical_offset * right_rect.height() * 0.5;
+                            }
                             let cb = make_postprocess_paint_callback(right_rect, Arc::clone(pb), self.size_b, self.linear_filter, p);
                             ui.painter().add(cb);
                         }
-                        painter.line_segment(
-                            [Pos2::new(split_x, panel_rect.top()), Pos2::new(split_x, panel_rect.bottom())],
-                            egui::Stroke::new(1.0, egui::Color32::LIGHT_BLUE),
-                        );
+
+                        if self.show_split_divider {
+                            let split_x = left_rect.right(); // frontière A|B
+                            let divider = egui::Rect::from_min_max(
+                                egui::pos2(split_x - 0.5, panel_rect.top()),
+                                egui::pos2(split_x + 0.5, panel_rect.bottom()),
+                            );
+                            // // zone de saisie plus large pour la souris :
+                            // let handle = egui::Rect::from_min_max(
+                            //     egui::pos2(split_x - 4.0, panel_rect.top()),
+                            //     egui::pos2(split_x + 4.0, panel_rect.bottom()),
+                            // );
+
+                            // // input drag pour déplacer self.compare_split
+                            // let resp = ui.interact(handle, ui.id().with("split_drag"), egui::Sense::click_and_drag());
+                            // if resp.dragged() {
+                            //     let dx = resp.drag_delta().x;
+                            //     let new_split_x = (split_x + dx).clamp(panel_rect.left() + 10.0, panel_rect.right() - 10.0);
+                            //     let t = (new_split_x - panel_rect.left()) / panel_rect.width();
+                            //     self.compare_split = t.clamp(0.05, 0.95); // bornes soft
+                            //     ctx.request_repaint();
+                            // }
+
+                            // rendu de la ligne
+                            ui.painter().rect_filled(divider, 0.0, egui::Color32::from_white_alpha(180));
+                        }
+
+
+                        let mouse_pos = ui.input(|i| i.pointer.hover_pos());
+                        let hover_a = mouse_pos.map(|p| left_rect.contains(p)).unwrap_or(false);
+                        let hover_b = mouse_pos.map(|p| right_rect.contains(p)).unwrap_or(false);
+
+                        // Pan
+                        if response.dragged() {
+                            let d = response.drag_delta();
+                            if hover_a { self.offset_a += d; }
+                            if hover_b { self.offset_b += d; }
+                            ctx.request_repaint();
+                        }
+
+                        // Zoom (molette ancrée sous le curseur)
+                        if response.hovered() {
+                            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                            if scroll != 0.0 {
+                                let lines = (scroll / 120.0_f32).clamp(-10.0, 10.0);
+                                let base: f32 = 1.0 + self.zoom_step_percent / 100.0;
+
+                                if hover_a {
+                                    let old = self.zoom_a;
+                                    let new = (self.zoom_a * base.powf(lines)).clamp(self.min_zoom, self.max_zoom);
+                                    if (new - old).abs() > f32::EPSILON {
+                                        if let Some(mp) = mouse_pos {
+                                            let tl = left_rect.left_top() + self.offset_a;
+                                            let before = mp - tl;
+                                            let scale = new / old;
+                                            let new_tl = mp - before * scale;
+                                            self.offset_a += new_tl - tl;
+                                        }
+                                        self.zoom_a = new;
+                                        ctx.request_repaint();
+                                    }
+                                } else if hover_b {
+                                    let old = self.zoom_b;
+                                    let new = (self.zoom_b * base.powf(lines)).clamp(self.min_zoom, self.max_zoom);
+                                    if (new - old).abs() > f32::EPSILON {
+                                        if let Some(mp) = mouse_pos {
+                                            let tl = right_rect.left_top() + self.offset_b;
+                                            let before = mp - tl;
+                                            let scale = new / old;
+                                            let new_tl = mp - before * scale;
+                                            self.offset_b += new_tl - tl;
+                                        }
+                                        self.zoom_b = new;
+                                        ctx.request_repaint();
+                                    }
+                                }
+                            }
+                        }
+
                     }
                     CompareMode::Blink => {
                         let t = ui.input(|i| i.time);
@@ -3063,7 +3315,7 @@ impl eframe::App for App {
                 painter.text(
                     panel_rect.center(),
                     egui::Align2::CENTER_CENTER,
-                    "Ouvrir l'image A — puis B pour activer la comparaison",
+                    "Open image A — then B to activate the comparison.",
                     egui::TextStyle::Heading.resolve(ui.style()),
                     egui::Color32::from_gray(180),
                 );
@@ -3075,14 +3327,11 @@ impl eframe::App for App {
             );
             ui.allocate_new_ui(UiBuilder::new().max_rect(status_rect), |ui| {
                 ui.horizontal(|ui| {
-                    let z = (self.zoom * 100.0).round();
-                    ui.label(format!("Zoom: {z:.0}%"));
-                    if self.compare_enabled {
-                        ui.separator();
-                        ui.label(format!(
-                            "Centre (u,v) = {:.2}, {:.2}",
-                            self.compare_center_uv[0], self.compare_center_uv[1]
-                        ));
+                    if self.compare_enabled && !self.link_views {
+                        ui.label(format!("A: {:.0}% | B: {:.0}%", self.zoom_a*100.0, self.zoom_b*100.0));
+                    } else {
+                        let z = (self.zoom * 100.0).round();
+                        ui.label(format!("Zoom: {z:.0}%"));
                     }
                     if self.size_a[0] > 0 {
                         ui.separator();
