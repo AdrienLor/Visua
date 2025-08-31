@@ -17,3 +17,11 @@ tiff   = "0.9"
 rfd    = "0.14"
 bytemuck = { version = "1.15", features = ["derive"] }
 num_cpus = "1.16"
+
+[package.metadata.bundle]
+identifier = "com.tonorg.visua"
+name = "Visua"
+icon = ["assets/icon.icns"]         # optionnel si tu as une icône
+copyright = "© 2025 Adrien"
+short_description = "Fast, clear image viewer"
+category = "public.app-category.photography"
