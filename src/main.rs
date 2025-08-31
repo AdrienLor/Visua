@@ -2502,7 +2502,7 @@ impl eframe::App for App {
         if self.show_options {
             egui::SidePanel::right("tools").default_width(278.0).resizable(false).show(ctx, |ui| {
                 ui.add_space(4.0);
-                ui.heading("Affichage");
+                ui.heading("View");
                 ui.add_space(8.0);
                 // if ui.button("Reset (R)").clicked() || ui.input(|i| i.key_pressed(egui::Key::R)) {
                 //     self.request_fit = true;
@@ -2513,16 +2513,16 @@ impl eframe::App for App {
                     if ui.button("180°").clicked() {
                         self.cmd_rotate_180();
                     }
-                    if ui.button("↔ Miroir H").clicked() {
+                    if ui.button("↔ Horz.").clicked() {
                         self.cmd_flip_h();
                     }
-                    if ui.button("↕ Miroir V").clicked() {
+                    if ui.button("↕ Vert.").clicked() {
                         self.cmd_flip_v();
                     }
                 });
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    ui.label("Lissage");
+                    ui.label("Smoothing");
                     let mut linear = self.linear_filter;
                     if ui.checkbox(&mut linear, "").changed() {
                         self.set_linear_filter(ctx, linear);
@@ -2530,9 +2530,9 @@ impl eframe::App for App {
                 });
 
                 ui.add_space(8.0);
-                ui.label("Couleur de fond");
+                ui.label("Background Color");
                 let mut bg_i = self.bg_gray as i32;
-                if ui.add(egui::Slider::new(&mut bg_i, 0..=255).step_by(1.0).drag_value_speed(1.0).text("Défaut : 18")).changed() 
+                if ui.add(egui::Slider::new(&mut bg_i, 0..=255).step_by(1.0).drag_value_speed(1.0).text("Default: 18")).changed() 
                 {
                     self.bg_gray = bg_i as u8;
                 }
