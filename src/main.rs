@@ -19,7 +19,11 @@ use std::{
     io::BufReader,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    sync::mpsc::{channel, Sender, Receiver},
+    thread,
 };
+use num_cpus;
+
 
 fn install_panic_hook_once() {
     static ONCE: std::sync::Once = std::sync::Once::new();
@@ -33,6 +37,96 @@ fn install_panic_hook_once() {
         }));
     });
 }
+
+
+//=================ASYNC=====================
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct ReqId(u64);
+
+#[derive(Clone, Copy, Debug)]
+enum Target {
+    MainPaneA,
+    MainPaneB,
+    // (plus tard) Thumb(usize),
+}
+
+struct Job {
+    id: ReqId,
+    path: PathBuf,
+    target: Target,
+    max_side: u32, // côté max à charger (réduit le coût d’upload GPU)
+}
+
+enum JobResult {
+    Ok {
+        id: ReqId,
+        target: Target,
+        size: [usize; 2],
+        rgba: Arc<Vec<u8>>, // RGBA8 prêt pour ColorImage
+    },
+    Err {
+        id: ReqId,
+        target: Target,
+        error: String,
+    },
+}
+
+
+struct Loader {
+    tx: Sender<Job>,
+    rx: Receiver<JobResult>,
+}
+
+fn start_loader(num_threads: usize) -> Loader {
+    let (tx_job, rx_job) = channel::<Job>();
+    let (tx_res, rx_res) = channel::<JobResult>();
+
+    
+        thread::spawn(move || {
+            while let Ok(job) = rx_job.recv() {
+                let Job { id, path, target, max_side } = job;
+                // 1) lecture + décodage (réutilise ton pipeline existant)
+                let res = (|| -> Result<(Vec<u8>, [usize; 2]), String> {
+                    // on garde ton load_any_rgba8 + resize “intelligent”
+                    let (mut data, dims) = load_any_rgba8(&path)?;
+                    let (w, h) = (dims[0] as u32, dims[1] as u32);
+                    let max0 = w.max(h);
+                    if max0 > max_side {
+                        // petit resize pour limiter le coût GPU
+                        let img = image::RgbaImage::from_raw(w, h, std::mem::take(&mut data))
+                            .ok_or_else(|| "buffer RGBA invalide".to_string())?;
+                        let scale = max_side as f32 / max0 as f32;
+                        let nw = (w as f32 * scale).round() as u32;
+                        let nh = (h as f32 * scale).round() as u32;
+                        let resized = image::DynamicImage::ImageRgba8(img)
+                            .resize_exact(nw, nh, image::imageops::FilterType::Triangle)
+                            .to_rgba8();
+                        let (nw, nh) = resized.dimensions();
+                        Ok((resized.into_raw(), [nw as usize, nh as usize]))
+                    } else {
+                        Ok((data, [w as usize, h as usize]))
+                    }
+                })();
+
+                match res {
+                    Ok((rgba, size)) => {
+                        let _ = tx_res.send(JobResult::Ok {
+                            id, target, size, rgba: Arc::new(rgba)
+                        });
+                    }
+                    Err(e) => {
+                        let _ = tx_res.send(JobResult::Err { id, target, error: e });
+                    }
+                }
+            }
+        });
+    
+
+    Loader { tx: tx_job, rx: rx_res }
+}
+
+
+//==============================================
 
 fn is_supported_ext(p: &Path) -> bool {
     let ext = p.extension()
@@ -1209,6 +1303,14 @@ struct App {
     size_b: [usize; 2],
     tex_b_cpu: Option<egui::TextureHandle>,
 
+     // --- Async loader ---
+    loader: Loader,
+    next_req_id: u64,
+    last_req_a: Option<ReqId>,
+    last_req_b: Option<ReqId>,
+    inflight_a: bool,
+    inflight_b: bool,
+
     // mode slideshow
     slideshow_mode: bool,
     auto_slideshow: bool,
@@ -1309,6 +1411,7 @@ struct App {
 
 impl Default for App {
     fn default() -> Self {
+        let loader = start_loader(num_cpus::get().clamp(2, 8));
         Self {
             orig_a: None,
             size_a: [0, 0],
@@ -1322,6 +1425,13 @@ impl Default for App {
             slideshow_interval: 5.0,
             slideshow_timer: 0.0,
 
+            loader,
+            next_req_id: 1,
+            last_req_a: None,
+            last_req_b: None,
+            inflight_a : false,
+            inflight_b : false,
+            
             pending_free: Vec::new(),
 
             filelist_a: Vec::new(),
@@ -1350,7 +1460,7 @@ impl Default for App {
 
             fit_allow_upscale: false,
 
-            zoom_step_percent: 50.0,
+            zoom_step_percent: 30.0,
 
             rotate_180: false,
             flip_h: false,
@@ -1756,13 +1866,25 @@ impl App {
     fn load_image_a(&mut self, ctx: &egui::Context, p: PathBuf) -> Result<(), String> {
         self.set_filelist_a(&p);
         self.request_fit = true;
-        self.load_image_a_only(ctx, p)
+        {
+            self.set_filelist_a(&p);
+            self.request_fit = true;
+            let max_side = self.max_tex_side_device; 
+            self.request_image_a(p, max_side);
+            Ok(())
+        }
     }
 
     fn load_image_b(&mut self, ctx: &egui::Context, p: PathBuf) -> Result<(), String> {
         self.set_filelist_b(&p);
         self.request_fit = true;
-        self.load_image_b_only(ctx, p)
+        {
+            self.set_filelist_b(&p);
+            self.request_fit = true;
+            let max_side = self.max_tex_side_device;
+            self.request_image_b(p, max_side);
+            Ok(())
+        }
     }
 
     fn navigate_a(&mut self, ctx: &egui::Context, step: i32) -> Result<(), String> {
@@ -1851,15 +1973,132 @@ impl App {
     fn mark_hist_dirty(&mut self) {
         self.hist_dirty = true;
     }
+
+    //Fonction pour fermer image b
+    fn close_b(&mut self, ctx: &egui::Context) {
+        // 1) Vider l’image B (CPU + GPU)
+        self.orig_b = None;
+        self.size_b = [0, 0];
+
+        if let Some(tex) = self.tex_b_cpu.take() {
+            self.pending_free.push(tex);
+        }
+
+        // 2) Reset état de navigation/selection B
+        self.filelist_b = Vec::new();
+        self.idx_b = 0;
+        self.last_req_b = None;
+        self.inflight_b = false;
+
+        // 3) Désactiver comportements spécifiques à la comparaison + centrer
+        self.compare_enabled = false;
+        self.cmd_center();         
+
+        // 4) UI : une frame tout de suite
+        ctx.request_repaint();
+    }
+
+    //Helper UI pour drainer les résultats 
+    fn drain_loader(&mut self, ctx: &egui::Context) {
+        let mut changed = false;
+
+        while let Ok(msg) = self.loader.rx.try_recv() {
+            match msg {
+                JobResult::Ok { id, target, size, rgba } => {
+                    let opts = if self.linear_filter { egui::TextureOptions::LINEAR }
+                               else { egui::TextureOptions::NEAREST };
+                    match target {
+                        Target::MainPaneA => {
+                            if Some(id) == self.last_req_a {
+                                self.size_a = size;
+                                self.orig_a = Some(rgba.clone());
+                                let img = egui::ColorImage::from_rgba_unmultiplied(
+                                    [size[0], size[1]], &rgba[..]
+                                );
+                                let tex = ctx.load_texture("imgA_cpu", img, opts);
+                                if let Some(old) = self.tex_a_cpu.replace(tex) {
+                                    self.pending_free.push(old);
+                                }
+                                // marquages existants
+                                self.hist_dirty = true;
+                                self.request_center = true;
+                                self.compare_center_uv = [0.5, 0.5];
+
+                                self.inflight_a = false;
+                                changed = true;
+                            }
+                        }
+                        Target::MainPaneB => {
+                            if Some(id) == self.last_req_b {
+                                self.size_b = size;
+                                self.orig_b = Some(rgba.clone());
+                                let img = egui::ColorImage::from_rgba_unmultiplied(
+                                    [size[0], size[1]], &rgba[..]
+                                );
+                                let tex = ctx.load_texture("imgB_cpu", img, opts);
+                                if let Some(old) = self.tex_b_cpu.replace(tex) {
+                                    self.pending_free.push(old);
+                                }
+                                self.hist_dirty = true;
+                                self.request_center = true;
+                                self.compare_center_uv = [0.5, 0.5];
+
+                                self.inflight_b = false;
+                                changed = true;
+
+                            }
+                        }
+                    }
+                }
+                JobResult::Err { target, error, .. } => {
+                    changed = true;
+                    eprintln!("load error for {:?}: {}", target, error);
+                }
+            }
+        }
+        if changed {
+        ctx.request_repaint(); // réveille l’UI immédiatement
+        }
+    }
+
+    fn request_image_a(&mut self, path: PathBuf, max_side: u32) {
+        let id = ReqId(self.next_req_id); self.next_req_id += 1;
+        self.last_req_a = Some(id);
+        self.inflight_a = true; 
+        self.orig_a = None;
+        if let Some(old) = self.tex_a_cpu.take() {
+            self.pending_free.push(old);
+        }
+        let _ = self.loader.tx.send(Job {
+            id, path, target: Target::MainPaneA, max_side
+        });
+    }
+
+    fn request_image_b(&mut self, path: PathBuf, max_side: u32) {
+        let id = ReqId(self.next_req_id); self.next_req_id += 1;
+        self.last_req_b = Some(id);
+        self.inflight_b = true; 
+        self.orig_b = None;
+        if let Some(old) = self.tex_b_cpu.take() {
+            self.pending_free.push(old);
+        }
+        let _ = self.loader.tx.send(Job {
+            id, path, target: Target::MainPaneB, max_side
+        });
+    }
+
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Drainer les résultats des workers
+        self.drain_loader(ctx);
+        if self.inflight_a || self.inflight_b {
+            ctx.request_repaint();
+        }
 
         // sortie du diaporama avec Échap ou clic droit
-        if self.slideshow_mode
-    && (ctx.input(|i| i.key_pressed(egui::Key::Escape)
-        || i.pointer.secondary_clicked())) {
+        if self.slideshow_mode && (ctx.input(|i| i.key_pressed(egui::Key::Escape) || i.pointer.secondary_clicked())) {
             self.slideshow_mode = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         }
@@ -1983,7 +2222,7 @@ impl eframe::App for App {
         // Barre du haut — actions
         egui::TopBottomPanel::top("menu").min_height(23.0).show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Ouvrir A").clicked()
+                if ui.button("Open A").clicked()
                     || ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::O))
                 {
                     if let Some(path) = FileDialog::new()
@@ -2001,7 +2240,7 @@ impl eframe::App for App {
                 }
                 
             if self.orig_a.is_some(){
-                if ui.button("Ouvrir B").clicked() {
+                if ui.button("Open B").clicked() {
                     if let Some(path) = FileDialog::new()
                         .add_filter(
                             "Images",
@@ -2020,6 +2259,17 @@ impl eframe::App for App {
                 }
             }
 
+            //bouton close B
+            if self.compare_enabled{
+                if ui.add(
+                egui::Button::new(
+                    RichText::new("X").color(egui::Color32::from_rgb(255, 255, 255)))
+                        .fill(egui::Color32::from_rgb(231, 52, 21))
+                    ).clicked() {
+                    self.close_b(ctx);
+                }
+            }
+
             ui.separator();
             let disable_a = self.filelist_a.len() <= 1;
             let disable_b = self.filelist_b.len() <= 1;
@@ -2027,13 +2277,13 @@ impl eframe::App for App {
             
             // Navigation dossier A
             if ui
-                .add_enabled(!disable_a, egui::Button::new("A ◀ Préc."))
+                .add_enabled(!disable_a, egui::Button::new("A ◀ Prev."))
                 .clicked()
             {
                 let _ = self.navigate_a(ctx, -1);
             }
             if ui
-                .add_enabled(!disable_a, egui::Button::new("A Suiv. ▶"))
+                .add_enabled(!disable_a, egui::Button::new("A Next ▶"))
                 .clicked()
             {
                 let _ = self.navigate_a(ctx, 1);
@@ -2044,13 +2294,13 @@ impl eframe::App for App {
             if self.compare_enabled {
                 // Navigation dossier B (comme avant)
                 if ui
-                    .add_enabled(!disable_b, egui::Button::new("B ◀ Préc."))
+                    .add_enabled(!disable_b, egui::Button::new("B ◀ Prev."))
                     .clicked()
                 {
                     let _ = self.navigate_b(ctx, -1);
                 }
                 if ui
-                    .add_enabled(!disable_b, egui::Button::new("B Suiv. ▶"))
+                    .add_enabled(!disable_b, egui::Button::new("B Next ▶"))
                     .clicked()
                 {
                     let _ = self.navigate_b(ctx, 1);
@@ -2061,12 +2311,12 @@ impl eframe::App for App {
             //Bouton Diaporama et options connexes
             if !self.compare_enabled && self.orig_a.is_some() {
                 ui.separator();
-                if ui.button("🎞 Diaporama").clicked() {
+                if ui.button("🎞 Slideshow").clicked() {
                     self.slideshow_mode = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
                 }
 
-                if ui.checkbox(&mut self.auto_slideshow, "Défilement auto").changed() {
+                if ui.checkbox(&mut self.auto_slideshow, "Auto").changed() {
                     if self.auto_slideshow {
                         self.slideshow_timer = self.slideshow_interval;
                     }
@@ -2074,26 +2324,21 @@ impl eframe::App for App {
 
                 ui.add(
                 egui::Slider::new(&mut self.slideshow_interval, 1.0..=30.0)
-                    .text("Intervalle (s)")
+                    .text("Delay")
                 );
             }
-
-          
+    
             // toggle diaporama avec F11
             if ctx.input(|i| i.key_pressed(egui::Key::F11)) {
                 self.slideshow_mode = !self.slideshow_mode;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.slideshow_mode));
             }
 
-            
-
             ui.separator();
 
             // --- PATCH: mémorise l'état avant interaction ---
             let was_compare_enabled = self.compare_enabled;
             let was_mode = self.compare_mode;
-
-            if self.orig_b.is_some(){ui.checkbox(&mut self.compare_enabled, "A/B");}
             
             if self.compare_enabled && self.orig_a.is_some() && self.orig_b.is_some() {
                 ui.separator();
@@ -2192,8 +2437,6 @@ impl eframe::App for App {
                     }
                 });
 
-
-
                 });          
             });
         });
@@ -2237,15 +2480,16 @@ impl eframe::App for App {
                     self.bg_gray = bg_i as u8;
                 }
                 ui.add_space(8.0);
-                ui.separator();                
-                ui.heading("Vitesse Zoom");
-                ui.add_space(8.0);
-                ui.add(
-                    egui::Slider::new(&mut self.zoom_step_percent, 1.0..=100.0)
-                        .step_by(1.0)
-                        .text("( % / cran )"),
-                );
-                ui.add_space(8.0);
+
+                // ui.separator();                
+                // ui.heading("Vitesse Zoom");
+                // ui.add_space(8.0);
+                // ui.add(
+                //     egui::Slider::new(&mut self.zoom_step_percent, 1.0..=100.0)
+                //         .step_by(1.0)
+                //         .text("( % / cran )"),
+                // );
+                // ui.add_space(8.0);
 
                 ui.separator();
                 ui.heading("Ajustements (GPU)");
@@ -2593,8 +2837,12 @@ impl eframe::App for App {
              // Raccourcis navigation
             let left = ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft));
             let right = ctx.input(|i| i.key_pressed(egui::Key::ArrowRight));
+            let up = ctx.input(|i| i.key_pressed(egui::Key::ArrowUp));
+            let down = ctx.input(|i| i.key_pressed(egui::Key::ArrowDown));
             if left {let _ = self.navigate_a(ctx, -1);}      
             if right {let _ = self.navigate_a(ctx, 1);}
+            if up {let _ = self.navigate_b(ctx, -1);}
+            if down {let _ = self.navigate_b(ctx, 1);}
             
             match (self.compare_enabled, self.compare_mode) {
                 (true, CompareMode::Split) => {
