@@ -20,6 +20,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.3.0] – 2025-08-31
+
+### Added
+- 🔓 **Independent pan & zoom in split comparison mode**:  
+  - New **Link toggle** in the toolbar (linked by default).  
+  - When unlinked, each pane (A/B) can be panned/zoomed independently with mouse drag & scroll.  
+- ➖ **Split divider**:  
+  - Optional vertical divider between A and B.  
+  - Toggleable from the toolbar.    
+
+### Changed
+- ⚡ **Asynchronous image loading**:  
+  - Old image remains visible until the new one is ready (no flicker).  
+  - Navigation and folder loads update immediately in the status bar.  
+- Navigation wrappers (`navigate_a` / `navigate_b`) now update paths immediately, avoiding stale info in the secondary bar.  
+- Fit / Center / 1:1 logic unified with proper handling of linked vs. independent split modes.  
+
+### Fixed
+- ✅ **No more UI flicker** when navigating between images (textures are swapped atomically on load).  
+- ✅ Paths in the secondary info bar (B) now update correctly on folder and image change.  
+- ✅ 1:1 zoom now behaves correctly in both linked and independent split modes.  
+- Improved repaint handling: no unnecessary full redraws, smoother updates when loading.  
+
+---
+
 ## [1.2.0] – 2025-08-24
 
 ### Changed
@@ -68,4 +93,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Basic image adjustments: brightness, contrast, saturation, gamma.  
 - Histogram view (linear / log).  
 - Transformations: flip, mirror, rotate 180°.  
-- Minimal, clean UI with egui/eframe.
+- Minimal, clean UI with egui/eframe.  
+
+---
+
+[Unreleased]: https://github.com/your-org/visua/compare/v1.3.0...HEAD  
+[1.3.0]: https://github.com/your-org/visua/compare/v1.2.0...v1.3.0  
+[1.2.0]: https://github.com/your-org/visua/compare/v1.1.0...v1.2.0  
+[1.1.0]: https://github.com/your-org/visua/compare/v1.0.0...v1.1.0  
+[1.0.0]: https://github.com/your-org/visua/releases/tag/v1.0.0
