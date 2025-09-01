@@ -1958,10 +1958,10 @@ impl App {
     }
 
     fn cmd_one_to_one(&mut self) {
-        // annule tout fit en attente : 1:1 doit être “pur”
         self.request_fit = false;
-        self.zoom = 1.0;                    // 1:1 pur
-        self.request_center = true;         // ou center_uv=[0.5,0.5], offset=0
+        self.zoom = 1.0;                    
+        self.request_center = true; 
+        self.request_one_to_one = true;        
     }
 
     fn cmd_rotate_180(&mut self) {
@@ -2022,7 +2022,7 @@ impl App {
 
         // 3) Désactiver comportements spécifiques à la comparaison + centrer
         self.compare_enabled = false;
-        self.cmd_center();         
+        self.cmd_fit();         
 
         // 4) UI : une frame tout de suite
         ctx.request_repaint();
@@ -2503,7 +2503,7 @@ impl eframe::App for App {
 
         // Panneau outils (droite)
         if self.show_options {
-            egui::SidePanel::right("tools").default_width(278.0).resizable(false).show(ctx, |ui| {
+            egui::SidePanel::right("tools").default_width(268.0).resizable(false).show(ctx, |ui| {
                 ui.add_space(4.0);
                 ui.heading("View");
                 ui.add_space(8.0);
@@ -2533,24 +2533,12 @@ impl eframe::App for App {
                 });
 
                 ui.add_space(8.0);
-                ui.label("Background Color");
                 let mut bg_i = self.bg_gray as i32;
-                if ui.add(egui::Slider::new(&mut bg_i, 0..=255).step_by(1.0).drag_value_speed(1.0).text("Default: 18")).changed() 
+                if ui.add(egui::Slider::new(&mut bg_i, 0..=255).step_by(1.0).drag_value_speed(1.0).text("Background color")).changed() 
                 {
                     self.bg_gray = bg_i as u8;
                 }
                 ui.add_space(8.0);
-
-                // ui.separator();                
-                // ui.heading("Vitesse Zoom");
-                // ui.add_space(8.0);
-                // ui.add(
-                //     egui::Slider::new(&mut self.zoom_step_percent, 1.0..=100.0)
-                //         .step_by(1.0)
-                //         .text("( % / cran )"),
-                // );
-                // ui.add_space(8.0);
-
                 ui.separator();
                 ui.heading("Calibration");
                 ui.add_space(8.0);
@@ -2674,7 +2662,14 @@ impl eframe::App for App {
                             eprintln!("[bin] {}", e); 
                         }
                     }
+
+                    ui.separator();
+                    ui.heading("Infos");
+
                 }
+
+
+
             });
         }
 
@@ -2711,8 +2706,8 @@ impl eframe::App for App {
 
                         if resp.changed() {
                             self.new_folder_input.retain(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-                            if self.new_folder_input.len() > 20 {
-                                self.new_folder_input.truncate(20);
+                            if self.new_folder_input.len() > 40 {
+                                self.new_folder_input.truncate(40);
                             }
                         }
 
@@ -2970,13 +2965,9 @@ impl eframe::App for App {
                 if self.request_one_to_one && ref_tex != [0, 0] {
                      // VRAI 1:1 : 1 pixel image = 1 pixel écran, recentré, sans upscale forcé
                     self.zoom = 1.0;
-                    // recentrage selon ta représentation :
+                    // recentrage 
                     self.request_center = true;       // si tu utilises un recentrage différé
-                    // ou bien directement :
-                    // self.center_uv = [0.5, 0.5];
-                    // self.offset = egui::vec2(0.0, 0.0);
-
-                    // ce 1:1 ne doit JAMAIS déclencher un fit
+                   
                     self.request_fit = false;
                     self.fit_allow_upscale = false;
 
