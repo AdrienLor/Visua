@@ -12,11 +12,14 @@ edition = "2024"
 [dependencies]
 eframe = { version = "0.29", features = ["wgpu"] }
 egui   = "0.29"
+egui_extras = "0.29"   
 image  = { version = "0.25", default-features = false, features = ["png","jpeg","gif","ico","bmp","tga","pnm","hdr","webp","tiff"] }
 tiff   = "0.9"
 rfd    = "0.14"
 bytemuck = { version = "1.15", features = ["derive"] }
 num_cpus = "1.16"
+kamadak-exif = "0.6.1"     
+chrono = "0.4"         
 
 [package.metadata.bundle]
 identifier = "com.tonorg.visua"
