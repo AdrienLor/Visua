@@ -1816,6 +1816,7 @@ impl App {
         self.hist_dirty = true;
         self.request_center = true;
         self.compare_center_uv = [0.5, 0.5];
+        self.cmd_fit();
 
         Ok(())
     }
@@ -1876,6 +1877,7 @@ impl App {
         self.hist_dirty = true;
         self.request_center = true;
         self.compare_center_uv = [0.5, 0.5];
+        self.cmd_fit();
 
         Ok(())
     }
@@ -1925,6 +1927,7 @@ impl App {
         self.path_a = Some(path.clone());
 
         self.load_image_a_only(ctx, path)
+
     }
 
     fn navigate_b(&mut self, ctx: &egui::Context, step: i32) -> Result<(), String> {
