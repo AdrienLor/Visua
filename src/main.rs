@@ -24,6 +24,8 @@ use std::{
 };
 use num_cpus;
 
+use exif;
+use std::collections::HashMap;
 
 fn install_panic_hook_once() {
     static ONCE: std::sync::Once = std::sync::Once::new();
@@ -375,6 +377,419 @@ fn parse_val_num(s: &str) -> Option<f64> {
         .replace('d', "E");
     t.parse::<f64>().ok()
 }
+
+
+//====================================== EXIF =========================================
+
+fn extract_exif(path: &std::path::Path) -> Result<Vec<(String, String)>, String> {
+   
+    let file = File::open(path).map_err(|e| format!("open: {e}"))?;
+    let mut bufreader = BufReader::new(&file);
+
+    let exifreader = exif::Reader::new();
+    let exif = exifreader
+        .read_from_container(&mut bufreader)
+        .map_err(|e| format!("parse: {e}"))?;
+
+    let mut seen = HashMap::new();
+
+    for f in exif.fields() {
+        let label = match f.tag {
+            exif::Tag::Make                     => Some("Camera Make"),
+            exif::Tag::Model                    => Some("Camera Model"),
+            exif::Tag::Software                 => Some("Software"),
+            exif::Tag::DateTimeOriginal         => Some("Date Taken"),
+            exif::Tag::ExposureTime             => Some("Exposure Time"),
+            exif::Tag::FNumber                  => Some("Aperture (f-stop)"),
+            exif::Tag::PhotographicSensitivity  => Some("ISO"),
+            exif::Tag::FocalLength              => Some("Focal Length"),
+            exif::Tag::ExposureBiasValue        => Some("Exposure Bias"),
+            exif::Tag::Flash                    => Some("Flash"),
+            exif::Tag::WhiteBalance             => Some("White Balance"),
+            exif::Tag::MeteringMode             => Some("Metering Mode"),
+            exif::Tag::Orientation              => Some("Orientation"),
+            exif::Tag::XResolution              => Some("X Resolution (DPI)"),
+            exif::Tag::YResolution              => Some("Y Resolution (DPI)"),
+            exif::Tag::ResolutionUnit           => Some("Resolution Unit"),
+            _ => None,
+        };
+
+        if let Some(name) = label {
+            let raw = f.display_value().with_unit(&exif).to_string();
+
+            // Formattage et traductions
+            let value = match f.tag {
+                exif::Tag::ExposureTime => {
+                    match &f.value {
+                        exif::Value::Rational(vec) if !vec.is_empty() => {
+                            let r = vec[0];
+                            if r.num > 0 {
+                                let denom = r.denom as f64 / r.num as f64;
+                                format!("1/{:.0} s", denom.round())
+                            } else {
+                                raw
+                            }
+                        }
+                        _ => raw,
+                    }
+                }
+                exif::Tag::FNumber => {
+                    match &f.value {
+                        exif::Value::Rational(vec) if !vec.is_empty() => {
+                            let r = vec[0];
+                            let val = r.num as f64 / r.denom as f64;
+                            format!("f/{:.1}", val)
+                        }
+                        _ => raw,
+                    }
+                }
+                exif::Tag::PhotographicSensitivity => {
+                    match f.value.get_uint(0) {
+                        Some(v) => format!("ISO {}", v),
+                        None => raw,
+                    }
+                }
+                exif::Tag::FocalLength => {
+                    match &f.value {
+                        exif::Value::Rational(vec) if !vec.is_empty() => {
+                            let r = vec[0];
+                            let val = r.num as f64 / r.denom as f64;
+                            format!("{:.1} mm", val)
+                        }
+                        _ => raw,
+                    }
+                }
+                exif::Tag::ExposureBiasValue => {
+                    match &f.value {
+                        exif::Value::SRational(vec) if !vec.is_empty() => {
+                            let r = vec[0];
+                            let val = r.num as f64 / r.denom as f64;
+                            if val > 0.0 {
+                                format!("+{:.1} EV", val)
+                            } else {
+                                format!("{:.1} EV", val)
+                            }
+                        }
+                        _ => raw,
+                    }
+                }
+                exif::Tag::Flash => match raw.to_lowercase().as_str() {
+                    s if s.contains("not fired") => "Not fired".to_string(),
+                    s if s.contains("fired") => "Fired".to_string(),
+                    _ => raw,
+                },
+                exif::Tag::WhiteBalance => match raw.to_lowercase().as_str() {
+                    s if s.contains("auto") => "Auto".to_string(),
+                    s if s.contains("manual") => "Manual".to_string(),
+                    _ => raw,
+                },
+                exif::Tag::Orientation => match raw.as_str() {
+                    s if s.contains("row 0 at top and column 0 at left") => "Top-left (normal)".to_string(),
+                    s if s.contains("row 0 at top and column 0 at right") => "Top-right (mirrored)".to_string(),
+                    s if s.contains("row 0 at bottom and column 0 at right") => "Bottom-right (rotated 180°)".to_string(),
+                    s if s.contains("row 0 at bottom and column 0 at left") => "Bottom-left (mirrored, rotated 180°)".to_string(),
+                    s if s.contains("row 0 at left and column 0 at top") => "Left-top (rotated 90° CCW)".to_string(),
+                    s if s.contains("row 0 at right and column 0 at top") => "Right-top (rotated 90° CW)".to_string(),
+                    s if s.contains("row 0 at right and column 0 at bottom") => "Right-bottom (mirrored, rotated 90° CW)".to_string(),
+                    s if s.contains("row 0 at left and column 0 at bottom") => "Left-bottom (mirrored, rotated 90° CCW)".to_string(),
+                    _ => raw,
+                },
+                _ => raw,
+            };
+
+            // Déduplique : 1 tag = 1 ligne
+            seen.entry(f.tag)
+                .or_insert_with(|| (name.to_string(), value));
+        }
+    }
+
+    if seen.is_empty() {
+        return Err("No relevant EXIF metadata found".into());
+    }
+
+    // --- Ordre logique fixe ---
+    let order = [
+        "Camera Make",
+        "Camera Model",
+        "Software",
+        "Date Taken",
+        "Exposure Time",
+        "Aperture (f-stop)",
+        "ISO",
+        "Focal Length",
+        "Exposure Bias",
+        "Flash",
+        "White Balance",
+        "Metering Mode",
+        "Orientation",
+        "X Resolution (DPI)",
+        "Y Resolution (DPI)",
+        "Resolution Unit",
+    ];
+
+    let mut out = Vec::new();
+    for key in order {
+        if let Some((_k, v)) = seen.values().find(|(name, _)| name == key) {
+            out.push((key.to_string(), v.clone()));
+        }
+    }
+
+    Ok(out)
+}
+
+
+
+fn start_meta_loader() -> MetaLoader {
+    let (tx_job, rx_job) = channel::<MetaJob>();
+    let (tx_res, rx) = channel::<MetaResult>();
+
+    std::thread::spawn(move || {
+        while let Ok(job) = rx_job.recv() {
+            let res = match extract_exif(&job.path) {
+                Ok(items) => MetaResult::Ok { pane: job.pane, items },
+                Err(e)    => MetaResult::Err { pane: job.pane, error: e },
+            };
+            let _ = tx_res.send(res);
+        }
+    });
+
+    MetaLoader { tx: tx_job, rx }
+}
+
+#[derive(Clone, Copy)]
+enum Pane { A, B }
+
+struct MetaJob {
+    pane: Pane,
+    path: PathBuf,
+}
+
+enum MetaResult {
+    Ok  { pane: Pane, items: Vec<(String, String)> },
+    Err { pane: Pane, error: String },
+}
+
+struct MetaLoader {
+    tx: Sender<MetaJob>,
+    rx: Receiver<MetaResult>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PropsTab { Properties, Exif }
+
+fn build_properties_for(size: [usize; 2], path: &std::path::Path) -> Vec<(String, String)> {
+    let mut out = Vec::<(String,String)>::new();
+
+    // Path / name / extension
+    out.push(("Path".into(), path.display().to_string()));
+    out.push(("File name".into(), path.file_name().unwrap_or_default().to_string_lossy().to_string()));
+    out.push(("Extension".into(), path.extension().unwrap_or_default().to_string_lossy().to_string()));
+
+    // File size + modified date
+    if let Ok(md) = std::fs::metadata(path) {
+        let bytes = md.len();
+        let human = if bytes >= 1<<20 { format!("{:.2} MiB", bytes as f64 / (1<<20) as f64) }
+                    else if bytes >= 1<<10 { format!("{:.2} KiB", bytes as f64 / (1<<10) as f64) }
+                    else { format!("{bytes} B") };
+        out.push(("File size".into(), human));
+
+        if let Ok(modified) = md.modified() {
+            let dt: chrono::DateTime<chrono::Local> = modified.into();
+            out.push(("Modified".into(), dt.format("%Y-%m-%d %H:%M:%S").to_string()));
+        }
+    }
+
+    // Dimensions
+    if size != [0,0] {
+        let (w,h) = (size[0], size[1]);
+        out.push(("Dimensions".into(), format!("{w} × {h} px")));
+        out.push(("Pixels".into(), format!("{:.3} MPix", (w as f64 * h as f64)/1_000_000.0)));
+    } else {
+        out.push(("Dimensions".into(), "n/a".into()));
+        out.push(("Pixels".into(), "n/a".into()));
+    }
+
+    out.push(("Color model".into(), "n/a".into()));
+    out.push(("DPI".into(), "n/a".into()));
+    out.push(("Compression".into(), "n/a".into()));
+    out.push(("Chroma subsampling".into(), "n/a".into()));
+    out.push(("Color profile".into(), "n/a".into()));
+
+    out
+}
+
+fn ui_props_table(
+    ui: &mut egui::Ui,
+    props_a: &[(String, String)],
+    props_b: &[(String, String)],
+    dual: bool,
+) {
+    use egui_extras::{TableBuilder, Column};
+
+    // ordre fixe
+    let order = [
+        "Path",
+        "File name",
+        "Extension",
+        "File size",
+        "Modified",
+        "Dimensions",
+        "Pixels",
+        "Color model",
+        "DPI",
+        "Compression",
+        "Chroma subsampling",
+        "Color profile",
+    ];
+
+    if dual {
+        TableBuilder::new(ui)
+            .striped(true)
+            .column(Column::auto().resizable(false).at_least(100.0))
+            .column(Column::remainder())
+            .column(Column::remainder())
+            .body(|mut body| {
+                for key in order {
+                    let val_a = props_a.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str()).unwrap_or("—");
+                    let val_b = props_b.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str()).unwrap_or("—");
+
+                    // on saute la ligne si A et B == "n/a"
+                    if val_a == "n/a" && val_b == "n/a" {
+                        continue;
+                    }
+
+                    body.row(20.0, |mut row| {
+                        row.col(|ui| { let _ = ui.monospace(key); });
+                        row.col(|ui| {
+                            if val_a == "n/a" {
+                                let _ = ui.weak("n/a");
+                            } else {
+                                let _ = ui.monospace(val_a);
+                            }
+                        });
+                        row.col(|ui| {
+                            if val_b == "n/a" {
+                                let _ = ui.weak("n/a");
+                            } else {
+                                let _ = ui.monospace(val_b);
+                            }
+                        });
+                    });
+                }
+            });
+    } else {
+        TableBuilder::new(ui)
+            .striped(true)
+            .column(Column::auto().resizable(false).at_least(100.0))
+            .column(Column::remainder())
+            .body(|mut body| {
+                for key in order {
+                    if let Some((_k, v)) = props_a.iter().find(|(k, _)| k == key) {
+                        if v == "n/a" {
+                            continue; // on saute les champs inutiles
+                        }
+                        body.row(20.0, |mut row| {
+                            row.col(|ui| { let _ = ui.monospace(key); });
+                            row.col(|ui| { let _ = ui.monospace(v); });
+                        });
+                    }
+                }
+            });
+    }
+}
+
+fn ui_props_exif(
+    ui: &mut egui::Ui,
+    meta_a: &[(String, String)],
+    meta_b: &[(String, String)],
+    dual: bool,
+    inflight_a: bool,
+    inflight_b: bool,
+    err_a: Option<&str>,
+    err_b: Option<&str>,
+) {
+    use egui_extras::{TableBuilder, Column};
+
+    // Bandeau d'état
+    ui.horizontal(|ui| {
+        if inflight_a {
+            let _ = ui.label("A: parsing…");
+        } else if let Some(err) = err_a {
+            let _ = ui.colored_label(egui::Color32::RED, format!("A: {err}"));
+        } else {
+            let _ = ui.weak(format!("A: {} tags", meta_a.len()));
+        }
+
+        if dual {
+            ui.separator();
+            if inflight_b {
+                let _ = ui.label("B: parsing…");
+            } else if let Some(err) = err_b {
+                let _ = ui.colored_label(egui::Color32::RED, format!("B: {err}"));
+            } else {
+                let _ = ui.weak(format!("B: {} tags", meta_b.len()));
+            }
+        }
+    });
+    ui.separator();
+
+    if dual {
+        TableBuilder::new(ui)
+            .striped(true)
+            .column(Column::auto().resizable(false).at_least(140.0)) // Tag
+            .column(Column::remainder())            // Valeur A
+            .column(Column::remainder())            // Valeur B
+            .body(|mut body| {
+                for (key, val_a) in meta_a {
+                    // chercher la valeur correspondante dans B
+                    let val_b = meta_b.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str()).unwrap_or("n/a");
+
+                    // ignorer si A et B = "n/a"
+                    if val_a == "n/a" && val_b == "n/a" {
+                        continue;
+                    }
+
+                    body.row(20.0, |mut row| {
+                        row.col(|ui| { let _ = ui.monospace(key); });
+
+                        row.col(|ui| {
+                            if val_a == "n/a" {
+                                let _ = ui.weak("n/a");
+                            } else {
+                                let _ = ui.monospace(val_a);
+                            }
+                        });
+
+                        row.col(|ui| {
+                            if val_b == "n/a" {
+                                let _ = ui.weak("n/a");
+                            } else {
+                                let _ = ui.monospace(val_b);
+                            }
+                        });
+                    });
+                }
+            });
+    } else {
+        TableBuilder::new(ui)
+            .striped(true)
+            .column(Column::auto().resizable(false).at_least(140.0)) // Tag
+            .column(Column::remainder())            // Valeur A
+            .body(|mut body| {
+                for (key, val_a) in meta_a {
+                    if val_a == "n/a" {
+                        continue; // ignorer complètement
+                    }
+                    body.row(20.0, |mut row| {
+                        row.col(|ui| { let _ = ui.monospace(key); });
+                        row.col(|ui| { let _ = ui.monospace(val_a); });
+                    });
+                }
+            });
+    }
+}
+
+
 
 
 // ======================= Dispatcher formats =======================
@@ -1415,7 +1830,23 @@ struct App {
 
     //status message
     status_message: Option<(String, egui::Color32)>,  // texte + couleur
-    status_timer: f32,                                // temps restant (en secondes)
+    status_timer: f32,     // temps restant (en secondes)
+    
+    //Metadata
+    meta_loader: MetaLoader,
+    meta_inflight_a: bool,
+    meta_inflight_b: bool,
+    meta_a: Vec<(String, String)>,
+    meta_b: Vec<(String, String)>,
+    meta_err_a: Option<String>,
+    meta_err_b: Option<String>,
+
+    // --- Modal "Image properties" ---
+    show_props: bool,                 // ouverture/fermeture du popup
+    props_tab: PropsTab,              // onglet actif
+    props_a: Vec<(String, String)>,   // propriétés calculées pour A
+    props_b: Vec<(String, String)>,   // idem B
+                      
 }
 
 impl Default for App {
@@ -1526,6 +1957,20 @@ impl Default for App {
 
             status_message: None,
             status_timer: 0.0,
+
+            meta_loader: start_meta_loader(),
+            meta_inflight_a: false,
+            meta_inflight_b: false,
+            meta_a: Vec::new(),
+            meta_b: Vec::new(),
+            meta_err_a: None,
+            meta_err_b: None,
+
+            show_props: false,
+            props_tab: PropsTab::Properties,
+            props_a: Vec::new(),
+            props_b: Vec::new(),
+
         }
     }
 }
@@ -2121,6 +2566,34 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+
+        // resultats Exif
+        while let Ok(msg) = self.meta_loader.rx.try_recv() {
+            match msg {
+                MetaResult::Ok { pane: Pane::A, items } => {
+                    self.meta_a = items;
+                    self.meta_err_a = None;
+                    self.meta_inflight_a = false;
+                }
+                MetaResult::Ok { pane: Pane::B, items } => {
+                    self.meta_b = items;
+                    self.meta_err_b = None;
+                    self.meta_inflight_b = false;
+                }
+                MetaResult::Err { pane: Pane::A, error } => {
+                    self.meta_a.clear();
+                    self.meta_err_a = Some(error);
+                    self.meta_inflight_a = false;
+                }
+                MetaResult::Err { pane: Pane::B, error } => {
+                    self.meta_b.clear();
+                    self.meta_err_b = Some(error);
+                    self.meta_inflight_b = false;
+                }
+            }
+            ctx.request_repaint();
+        }
+
         // Drainer les résultats des workers
         self.drain_loader(ctx);
         if self.inflight_a || self.inflight_b {
@@ -2663,12 +3136,26 @@ impl eframe::App for App {
                         }
                     }
 
-                    ui.separator();
-                    ui.heading("Infos");
-
                 }
 
+                ui.separator();
+                ui.heading("Infos");
+                if ui.button("Show properties").clicked() {
+                    self.show_props = true;
 
+                    if let Some(p) = &self.path_a {
+                        self.props_a = build_properties_for(self.size_a, p);
+                        let _ = self.meta_loader.tx.send(MetaJob { pane: Pane::A, path: p.clone() });
+                        self.meta_inflight_a = true;
+                    }
+                    if self.compare_enabled {
+                        if let Some(p) = &self.path_b {
+                            self.props_b = build_properties_for(self.size_b, p);
+                            let _ = self.meta_loader.tx.send(MetaJob { pane: Pane::B, path: p.clone() });
+                            self.meta_inflight_b = true;
+                        }
+                    }
+                }
 
             });
         }
@@ -2739,6 +3226,62 @@ impl eframe::App for App {
                 self.show_new_folder_dialog = false;
             }
         }
+
+        if self.show_props {
+            // --- voile sombre (bloque l'arrière-plan) ---
+            let screen = ctx.input(|i| i.screen_rect());
+            let blocker = egui::Rect::from_min_size(screen.left_top(), screen.size());
+            egui::Area::new(egui::Id::new("props_modal_blocker"))
+                .order(egui::Order::Background)
+                .interactable(true)
+                .fixed_pos(screen.left_top())
+                .show(ctx, |ui| {
+                    let _ = ui.interact(blocker, ui.id().with("catch_all"), egui::Sense::click());
+                    ui.painter()
+                        .rect_filled(blocker, 0.0, egui::Color32::from_black_alpha(100));
+                });
+
+            // --- fenêtre centrale ---
+            egui::Window::new("Image properties")
+                // ⬇️ pas de .open()
+                .collapsible(false)
+                .resizable(true)
+                .default_size([720.0, 540.0])
+                .constrain(true)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        let _ = ui.selectable_value(&mut self.props_tab, PropsTab::Properties, "Properties");
+                        let _ = ui.selectable_value(&mut self.props_tab, PropsTab::Exif, "EXIF");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("Close").clicked() {
+                                self.show_props = false; // ferme manuellement
+                            }
+                        });
+                    });
+                    ui.separator();
+
+                    let dual = self.compare_enabled && self.path_b.is_some();
+                    match self.props_tab {
+                        PropsTab::Properties => {
+                            ui_props_table(ui, &self.props_a, &self.props_b, dual);
+                        }
+                        PropsTab::Exif => {
+                            ui_props_exif(
+                                ui,
+                                &self.meta_a,
+                                &self.meta_b,
+                                dual,
+                                self.meta_inflight_a,
+                                self.meta_inflight_b,
+                                self.meta_err_a.as_deref(),
+                                self.meta_err_b.as_deref(),
+                            );
+                        }
+                    };
+                });
+        }
+
 
 
         // Panneau central
@@ -3413,6 +3956,7 @@ impl eframe::App for App {
 
             self.hist_dirty = false;
         }
+
     }
 }
 
