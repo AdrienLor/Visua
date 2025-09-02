@@ -1862,7 +1862,7 @@ impl Default for App {
 
             slideshow_mode: false,
             auto_slideshow: true,
-            slideshow_interval: 5.0,
+            slideshow_interval: 3.0,
             slideshow_timer: 0.0,
 
             loader,
@@ -2922,21 +2922,8 @@ impl eframe::App for App {
                     }
                 }
             }
-            
-            });
-        });
 
-        // Seconde ligne — chemins et bouton option
-        egui::TopBottomPanel::top("file_info_line").min_height(23.0).show(ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.small(match (&self.path_a, &self.path_b) {
-                    (Some(pa), Some(pb)) => format!("A: {}    |    B: {}", pa.display(), pb.display()),
-                    (Some(pa), None) => format!("A: {}", pa.display()),
-                    (None, Some(pb)) => format!("B: {}", pb.display()),
-                    _ => String::from("—"),
-                });
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // -- Bouton Options
                     if ui.add(
                 egui::Button::new(
@@ -2945,16 +2932,29 @@ impl eframe::App for App {
                     ).clicked() {
                         self.show_options = !self.show_options;
                     }
-
                 // -- Bouton About
                     if ui.add(
                 egui::Button::new(
                     RichText::new("ℹ").color(egui::Color32::from_rgb(255, 255, 255)))
                         .fill(egui::Color32::from_rgb(231, 52, 21))
                     ).clicked() {
-                        self.show_about = true;
+                        self.show_props = true;
+
+                        if let Some(p) = &self.path_a {
+                            self.props_a = build_properties_for(self.size_a, p);
+                            let _ = self.meta_loader.tx.send(MetaJob { pane: Pane::A, path: p.clone() });
+                            self.meta_inflight_a = true;
+                        }
+                        if self.compare_enabled {
+                            if let Some(p) = &self.path_b {
+                                self.props_b = build_properties_for(self.size_b, p);
+                                let _ = self.meta_loader.tx.send(MetaJob { pane: Pane::B, path: p.clone() });
+                                self.meta_inflight_b = true;
+                            }
+                        }
                     }
-                    
+
+                // Boutons FIT 11 center     
                 ui.separator();
                 ui.horizontal(|ui| {
 
@@ -2969,10 +2969,21 @@ impl eframe::App for App {
                         self.cmd_fit();
                     }
                 });
-
-                });          
             });
+            });          
         });
+
+        // Seconde ligne — chemins et bouton option
+        // egui::TopBottomPanel::top("file_info_line").min_height(23.0).show(ctx, |ui| {
+        //     ui.horizontal_wrapped(|ui| {
+        //         ui.small(match (&self.path_a, &self.path_b) {
+        //             (Some(pa), Some(pb)) => format!("A: {}    |    B: {}", pa.display(), pb.display()),
+        //             (Some(pa), None) => format!("A: {}", pa.display()),
+        //             (None, Some(pb)) => format!("B: {}", pb.display()),
+        //             _ => String::from("—"),
+        //         });
+        //     });
+        // });
 
         // Panneau outils (droite)
         if self.show_options {
@@ -3137,25 +3148,14 @@ impl eframe::App for App {
                     }
 
                 }
-
-                ui.separator();
-                ui.heading("Infos");
-                if ui.button("Show properties").clicked() {
-                    self.show_props = true;
-
-                    if let Some(p) = &self.path_a {
-                        self.props_a = build_properties_for(self.size_a, p);
-                        let _ = self.meta_loader.tx.send(MetaJob { pane: Pane::A, path: p.clone() });
-                        self.meta_inflight_a = true;
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
+                    ui.add_space(8.0);
+                    if ui.button("About").clicked() {
+                        self.show_about = true;
                     }
-                    if self.compare_enabled {
-                        if let Some(p) = &self.path_b {
-                            self.props_b = build_properties_for(self.size_b, p);
-                            let _ = self.meta_loader.tx.send(MetaJob { pane: Pane::B, path: p.clone() });
-                            self.meta_inflight_b = true;
-                        }
-                    }
-                }
+                    
+                });
+              
 
             });
         }
@@ -3245,8 +3245,8 @@ impl eframe::App for App {
             egui::Window::new("Image properties")
                 // ⬇️ pas de .open()
                 .collapsible(false)
-                .resizable(true)
-                .default_size([720.0, 540.0])
+                .resizable(false)
+                .default_size([640.0, 480.0])
                 .constrain(true)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
@@ -3529,11 +3529,14 @@ impl eframe::App for App {
             let right = ctx.input(|i| i.key_pressed(egui::Key::ArrowRight));
             let up = ctx.input(|i| i.key_pressed(egui::Key::ArrowUp));
             let down = ctx.input(|i| i.key_pressed(egui::Key::ArrowDown));
-            if left {let _ = self.navigate_a(ctx, -1);}      
-            if right {let _ = self.navigate_a(ctx, 1);}
-            if up {let _ = self.navigate_b(ctx, -1);}
-            if down {let _ = self.navigate_b(ctx, 1);}
             
+            if !self.show_about && !self.show_props {
+                if left  {let _ = self.navigate_a(ctx, -1);}      
+                if right {let _ = self.navigate_a(ctx, 1);}
+                if up {let _ = self.navigate_b(ctx, -1);}
+                if down {let _ = self.navigate_b(ctx, 1);}
+            }
+
             match (self.compare_enabled, self.compare_mode) {
                 (true, CompareMode::Split) => {
                     // Pan: on déplace le centre UV
