@@ -4,41 +4,52 @@
 
 ---
 
-## ✨ Features
+## Features
 
 - **Dual-pane comparison mode (A/B)**
   - Linked **or independent** pan & zoom (toggle *Link* in the toolbar)  
-  - Side-by-side or overlay comparison  
+  - Split view, blink mode, or pixel-wise difference mode  
 - **Supported formats**  
-  - PNG, JPG, BMP, TIFF (incl. 16/32-bit float), WebP, GIF, TGA, ICO, HDR, PNM
+  - PNG, JPG, BMP, TIFF (incl. 16/32-bit float), WebP, GIF, TGA, ICO, HDR, PNM  
 - **Sorting workflow**: quick triage of images into user-defined folders, with **on-the-fly folder creation** directly from the UI  
 - **Image adjustments**: brightness, contrast, saturation, gamma  
-- **Histogram view** (linear / logarithmic)  
+- **Histogram view** (linear / logarithmic, per channel or luma)  
 - **Navigation by folder** with independent browsing for A and B  
-- **Transformations**: flip H/V, rotate 180°  
-- **Slideshow mode** (fullscreen, distraction-free) with automatic playback  
+- **Transformations**: flip H/V, rotate 90° steps  
+- **Slideshow mode** (fullscreen, distraction-free) with automatic playback and adjustable fade transition  
+- **Modal dialogs** for *Properties* (including EXIF metadata) and *About*  
 - **Lightweight, minimal UI** (built with [`egui`](https://github.com/emilk/egui) / [`eframe`](https://github.com/emilk/egui/tree/master/crates/eframe))  
 - **Cross-platform**: Windows, Linux, macOS  
 
 ---
 
-## 🆕 What’s new (v1.3.0)
-- Independent pan & zoom in split comparison mode (Link toggle)   
-- Asynchronous image loading (no flicker, old image stays visible until swap)  
-- Improved navigation: path bars update instantly for both panes   
+## What’s new (v1.4.0)
+
+- **Smooth fade-in transitions** when loading images  
+- **Slideshow improvements**:  
+  - Adjustable fade duration (0 to ~6s)  
+  - Navigation with arrows, mouse click, or wheel  
+- **Rotation by 90° increments** (replaces old fixed 180° toggle)  
+- **Better centering & fit logic** with rotated images  
+- **Modal windows** for properties and about panel, blocking background interactions  
+- **Improved comparison tools**: blink and diff modes polished, with proper centering and alpha handling  
+- **Minor UI refinements 
 
 See the full [Changelog](CHANGELOG.md) for details.
 
 ---
 
-## 🚀 Roadmap
+## Roadmap
+
 - Customizable keyboard shortcuts  
-- Extended TIFF handling (compression, metadata)  
+- Extended TIFF support (compression, metadata)  
+- ICC color profile handling  
 - Annotation and measurement tools  
-- Color profiles / ICC support  
+- Performance optimizations for very large images  
 
 ---
 
 ## 📦 Build
+
 ```bash
 cargo build --release
