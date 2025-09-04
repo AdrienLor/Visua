@@ -21,6 +21,7 @@ use std::{
     sync::{Arc, Mutex},
     sync::mpsc::{channel, Sender, Receiver},
     thread,
+    time::Instant,
 };
 use num_cpus;
 
@@ -1001,7 +1002,7 @@ struct GpuParams {
     gamma:      f32,
     flip_h:     u32,
     flip_v:     u32,
-    rot_180:    u32,
+    rotation:   u32,
     _pad0:      u32,
     zoom:       f32,
     _pad1:      f32,
@@ -1014,6 +1015,7 @@ struct GpuParams {
     rect_min_x: f32, rect_min_y: f32,
     rect_max_x: f32, rect_max_y: f32,
     ppp:        f32,
+    fade_alpha: f32,
     _pad2:      [f32; 3],   // garde l’alignement (vec3 côté WGSL)
     _pad3:      [f32; 4],   // <-- NOUVEAU : pousse la taille totale à 112 octets
 }
@@ -1026,7 +1028,7 @@ struct Params {
     gamma:      f32,
     flip_h:     u32,
     flip_v:     u32,
-    rot_180:    u32,
+    rotation:   u32,
     _pad0:      u32,
     zoom:       f32,
     _pad1:      f32,
@@ -1039,6 +1041,7 @@ struct Params {
     rect_min_x: f32, rect_min_y: f32,
     rect_max_x: f32, rect_max_y: f32,
     ppp:        f32,
+    fade_alpha: f32,
     _pad2:      vec3<f32>,
 };
 @group(0) @binding(0) var samp: sampler;
@@ -1084,9 +1087,15 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let rw = max(P.rect_max_x - P.rect_min_x, 1e-6);
     let rh = max(P.rect_max_y - P.rect_min_y, 1e-6);
 
-    // taille d'affichage de l'image (points)
-    let tw = max(P.tex_w * P.zoom, 1e-6);
-    let th = max(P.tex_h * P.zoom, 1e-6);
+    var tw: f32;
+    var th: f32;
+    if (P.rotation == 90u || P.rotation == 270u) {
+        tw = max(P.tex_h * P.zoom, 1e-6);
+        th = max(P.tex_w * P.zoom, 1e-6);
+    } else {
+        tw = max(P.tex_w * P.zoom, 1e-6);
+        th = max(P.tex_h * P.zoom, 1e-6);
+    }
 
     // mapping UV (non clampé)
     var uu: f32;
@@ -1104,10 +1113,23 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         vv = (ry - P.off_y) / th;
     }
 
-    // flips / rotation 180°
+    // flips / rotation
     if (P.flip_h == 1u) { uu = 1.0 - uu; }
     if (P.flip_v == 1u) { vv = 1.0 - vv; }
-    if (P.rot_180 == 1u) { uu = 1.0 - uu; vv = 1.0 - vv; }
+
+    // rotation selon l'angle
+    if (P.rotation == 90u) {
+        let tmp = uu;
+        uu = vv;
+        vv = 1.0 - tmp;
+    } else if (P.rotation == 180u) {
+        uu = 1.0 - uu;
+        vv = 1.0 - vv;
+    } else if (P.rotation == 270u) {
+        let tmp = uu;
+        uu = 1.0 - vv;
+        vv = tmp;
+    }
 
     // Si en dehors de [0,1], rendre TRANSPARENT (montre le fond)
     let inside = (uu >= 0.0) && (uu <= 1.0) && (vv >= 0.0) && (vv <= 1.0);
@@ -1122,7 +1144,9 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 
     let col = textureSample(tex, samp, vec2<f32>(u, v));
     let out_rgb = apply_bcs_gamma(col.rgb);
-    return vec4<f32>(out_rgb, 1.0);
+
+    // 🎬 fade-in simple : multiplie la sortie par alpha
+    return vec4<f32>(out_rgb, 1.0) * P.fade_alpha;
 }
 "#;
 
@@ -1134,7 +1158,7 @@ struct Params {
     gamma:      f32,
     flip_h:     u32,
     flip_v:     u32,
-    rot_180:    u32,
+    rotation:   u32,
     _pad0:      u32,
     zoom:       f32,
     _pad1:      f32,
@@ -1147,6 +1171,7 @@ struct Params {
     rect_min_x: f32, rect_min_y: f32,
     rect_max_x: f32, rect_max_y: f32,
     ppp:        f32,
+    fade_alpha: f32,
     _pad2:      vec3<f32>,
 };
 
@@ -1191,8 +1216,15 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let rw = max(P.rect_max_x - P.rect_min_x, 1e-6);
     let rh = max(P.rect_max_y - P.rect_min_y, 1e-6);
 
-    let tw = max(P.tex_w * P.zoom, 1e-6);
-    let th = max(P.tex_h * P.zoom, 1e-6);
+    var tw: f32;
+    var th: f32;
+    if (P.rotation == 90u || P.rotation == 270u) {
+        tw = max(P.tex_h * P.zoom, 1e-6);
+        th = max(P.tex_w * P.zoom, 1e-6);
+    } else {
+        tw = max(P.tex_w * P.zoom, 1e-6);
+        th = max(P.tex_h * P.zoom, 1e-6);
+    }
 
     var u: f32;
     var v: f32;
@@ -1211,7 +1243,20 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 
     if (P.flip_h == 1u) { u = 1.0 - u; }
     if (P.flip_v == 1u) { v = 1.0 - v; }
-    if (P.rot_180 == 1u) { u = 1.0 - u; v = 1.0 - v; }
+
+    // rotation selon l'angle
+    if (P.rotation == 90u) {
+        let tmp = u;
+        u = v;
+        v = 1.0 - tmp;
+    } else if (P.rotation == 180u) {
+        u = 1.0 - u;
+        v = 1.0 - v;
+    } else if (P.rotation == 270u) {
+        let tmp = u;
+        u = 1.0 - v;
+        v = tmp;
+    }
 
     // Transparence hors image pour montrer le fond
     if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) {
@@ -1221,10 +1266,11 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let colA = textureSample(texA, samp, vec2<f32>(u, v)).rgb;
     let colB = textureSample(texB, samp, vec2<f32>(u, v)).rgb;
 
-    var diff = abs(colA - colB);          // |A - B|
-    diff = clamp01(diff * vec3<f32>(1.0)); // gain = 1.0 (on pourra exposer un slider si tu veux)
+    var diff = abs(colA - colB);
+    diff = clamp01(diff * vec3<f32>(1.0));
     let out_rgb = apply_bcs_gamma(diff);
     return vec4<f32>(out_rgb, 1.0);
+
 }
 "#;
 
@@ -1769,7 +1815,7 @@ struct App {
     new_folder_input: String,      // saisie utilisateur
 
     // Transfos
-    rotate_180: bool,
+    rotation : u32,
     flip_h: bool,
     flip_v: bool,
 
@@ -1846,6 +1892,14 @@ struct App {
     props_tab: PropsTab,              // onglet actif
     props_a: Vec<(String, String)>,   // propriétés calculées pour A
     props_b: Vec<(String, String)>,   // idem B
+
+    // Transition fade
+    fade_alpha_a: f32,
+    fade_alpha_b: f32,
+    fade_start_a: Option<Instant>,
+    fade_start_b: Option<Instant>,
+    fade_enabled : bool,
+    slideshow_fade_duration: f32,  
                       
 }
 
@@ -1902,7 +1956,7 @@ impl Default for App {
 
             zoom_step_percent: 30.0,
 
-            rotate_180: false,
+            rotation : 0,
             flip_h: false,
             flip_v: false,
 
@@ -1971,6 +2025,12 @@ impl Default for App {
             props_a: Vec::new(),
             props_b: Vec::new(),
 
+            fade_alpha_a : 0.0,
+            fade_alpha_b : 0.0,
+            fade_start_a : None,
+            fade_start_b : None,
+            fade_enabled : true,
+            slideshow_fade_duration : 2.0,        
         }
     }
 }
@@ -2329,17 +2389,23 @@ impl App {
 
 
     fn load_image_a(&mut self, _ctx: &egui::Context, p: PathBuf) -> Result<(), String> {
+        // 🔹 Mets à jour la liste de fichiers et l’index courant
         self.set_filelist_a(&p);
         self.idx_a = self.filelist_a.iter().position(|x| x == &p).unwrap_or(0);
         self.path_a = Some(p.clone());
+
+        // 🔹 Forcer un fit au premier affichage de l’image
         self.request_fit = true;
-        {
-            self.set_filelist_a(&p);
-            self.request_fit = true;
-            let max_side = self.max_tex_side_device; 
-            self.request_image_a(p, max_side);
-            Ok(())
-        }
+
+        // 🔹 Réinitialiser le fade à chaque nouvelle image
+        self.fade_start_a = Some(Instant::now());
+        self.fade_alpha_a = 0.0;
+
+        // 🔹 Envoie du job asynchrone de chargement
+        let max_side = self.max_tex_side_device;
+        self.request_image_a(p, max_side);
+
+        Ok(())
     }
 
     fn load_image_b(&mut self, _ctx: &egui::Context, p: PathBuf) -> Result<(), String> {
@@ -2347,13 +2413,15 @@ impl App {
         self.idx_b = self.filelist_b.iter().position(|x| x == &p).unwrap_or(0);
         self.path_b = Some(p.clone());
         self.request_fit = true;
-        {
-            self.set_filelist_b(&p);
-            self.request_fit = true;
-            let max_side = self.max_tex_side_device;
-            self.request_image_b(p, max_side);
-            Ok(())
-        }
+
+        self.fade_start_b = Some(Instant::now());
+        self.fade_alpha_b = 0.0;
+       
+        let max_side = self.max_tex_side_device;
+        self.request_image_b(p, max_side);
+        
+        Ok(())
+        
     }
 
     fn navigate_a(&mut self, ctx: &egui::Context, step: i32) -> Result<(), String> {
@@ -2370,6 +2438,9 @@ impl App {
         self.idx_a = ni as usize;
         let path = self.filelist_a[self.idx_a].clone();
         self.path_a = Some(path.clone());
+
+        self.fade_start_a = Some(Instant::now());
+        self.fade_alpha_a = 0.0;
 
         self.load_image_a_only(ctx, path)
 
@@ -2390,11 +2461,14 @@ impl App {
         let path = self.filelist_b[self.idx_b].clone();
         self.path_b = Some(path.clone());
 
+        self.fade_start_b = Some(Instant::now());
+        self.fade_alpha_b = 0.0;
+
         self.load_image_b_only(ctx, path)
     }
 
     fn cmd_fit(&mut self) {
-        self.request_fit = true;        // c’est tout : l’upscale est interdit au moment de l’application
+        self.request_fit = true;        
         self.request_center = true;
     }
 
@@ -2407,10 +2481,6 @@ impl App {
         self.zoom = 1.0;                    
         self.request_center = true; 
         self.request_one_to_one = true;        
-    }
-
-    fn cmd_rotate_180(&mut self) {
-        self.rotate_180 = !self.rotate_180;
     }
 
     fn cmd_flip_h(&mut self) {
@@ -2481,7 +2551,8 @@ impl App {
             match msg {
                 JobResult::Ok { id, target, size, rgba } => {
                     let opts = if self.linear_filter { egui::TextureOptions::LINEAR }
-                               else { egui::TextureOptions::NEAREST };
+                            else { egui::TextureOptions::NEAREST };
+
                     match target {
                         Target::MainPaneA => {
                             if Some(id) == self.last_req_a {
@@ -2494,7 +2565,11 @@ impl App {
                                 if let Some(old) = self.tex_a_cpu.replace(tex) {
                                     self.pending_free.push(old);
                                 }
-                                // marquages existants
+
+                                // 🔹 Reset fade-in pour A
+                                self.fade_start_a = Some(Instant::now());
+                                self.fade_alpha_a = 0.0;
+
                                 self.hist_dirty = true;
                                 self.request_center = true;
                                 self.compare_center_uv = [0.5, 0.5];
@@ -2514,13 +2589,17 @@ impl App {
                                 if let Some(old) = self.tex_b_cpu.replace(tex) {
                                     self.pending_free.push(old);
                                 }
+
+                                // 🔹 Reset fade-in pour B
+                                self.fade_start_b = Some(Instant::now());
+                                self.fade_alpha_b = 0.0;
+
                                 self.hist_dirty = true;
                                 self.request_center = true;
                                 self.compare_center_uv = [0.5, 0.5];
 
                                 self.inflight_b = false;
                                 changed = true;
-
                             }
                         }
                     }
@@ -2531,8 +2610,9 @@ impl App {
                 }
             }
         }
+
         if changed {
-        ctx.request_repaint(); // réveille l’UI immédiatement
+            ctx.request_repaint(); // réveille l’UI immédiatement
         }
     }
 
@@ -2566,6 +2646,46 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+
+        let now = Instant::now();
+
+        let fade_duration = if self.slideshow_mode {
+            self.slideshow_fade_duration.max(0.01)
+        } else if self.fade_enabled {
+            0.25 // fade rapide hors slideshow
+        } else {
+            0.0 // pas de fade
+        };
+
+        if fade_duration > 0.0 {
+            if let Some(start) = self.fade_start_a {
+                let elapsed = now.duration_since(start).as_secs_f32();
+                if elapsed < fade_duration {
+                    self.fade_alpha_a = (elapsed / fade_duration).clamp(0.0, 1.0);
+                    ctx.request_repaint();
+                } else {
+                    self.fade_alpha_a = 1.0;
+                    self.fade_start_a = None;
+                }
+            }
+
+            if let Some(start) = self.fade_start_b {
+                let elapsed = now.duration_since(start).as_secs_f32();
+                if elapsed < fade_duration {
+                    self.fade_alpha_b = (elapsed / fade_duration).clamp(0.0, 1.0);
+                    ctx.request_repaint();
+                } else {
+                    self.fade_alpha_b = 1.0;
+                    self.fade_start_b = None;
+                }
+            }
+        } else {
+            // Pas de fade → alpha toujours plein
+            self.fade_alpha_a = 1.0;
+            self.fade_alpha_b = 1.0;
+            self.fade_start_a = None;
+            self.fade_start_b = None;
+        }
 
         // resultats Exif
         while let Ok(msg) = self.meta_loader.rx.try_recv() {
@@ -2620,11 +2740,11 @@ impl eframe::App for App {
         }
 
         if self.slideshow_mode {
-            // navigation flèches gauche/droite, clic gauche et molette
-            let nav = ctx.input(|i| {
+            // 1) Récupération des inputs → pas encore de mutation de self
+            let nav_step = ctx.input(|i| {
                 if i.key_pressed(egui::Key::ArrowRight)
-                    || i.pointer.primary_clicked()           // clic gauche
-                    || i.raw_scroll_delta.y < 0.0                // molette vers le haut
+                    || i.pointer.primary_clicked()     // clic gauche
+                    || i.raw_scroll_delta.y < 0.0      // molette vers le haut
                 {
                     Some(1)
                 } else if i.key_pressed(egui::Key::ArrowLeft) || i.raw_scroll_delta.y > 0.0 {
@@ -2634,24 +2754,76 @@ impl eframe::App for App {
                 }
             });
 
-            if let Some(step) = nav {
-                let _ = self.navigate_a(ctx, step); // ta fonction existante pour naviguer les images A
+            // 2) Navigation si input détecté
+            if let Some(step) = nav_step {
+                if let Err(e) = self.navigate_a(ctx, step) {
+                    eprintln!("slideshow navigate error: {e}");
+                } else {
+                    // 🔹 reset du fade
+                    self.fade_start_a = Some(Instant::now());
+                    self.fade_alpha_a = 0.0;
+                }
+
                 if self.auto_slideshow {
                     self.slideshow_timer = self.slideshow_interval; // reset si navigation manuelle
                 }
             }
 
-            // affichage image A plein écran
+            // 3) Affichage image A plein écran (avec GPU fade, fit et centrage)
             egui::CentralPanel::default().show(ctx, |ui| {
-                if let Some(tex) = &self.tex_a_cpu {
-                    let avail = ui.available_size();
-                    let tex_size = tex.size_vec2();
-                    let scale = (avail.x / tex_size.x).min(avail.y / tex_size.y);
-                    let scaled = tex_size * scale;
+                let panel_rect = ui.max_rect();
 
-                    ui.centered_and_justified(|ui| {
-                        ui.image((tex.id(), scaled));
-                    });
+                if let Some(pa) = &self.orig_a {
+                    // dimensions de l’image source
+                    let (tw, th) = (self.size_a[0] as f32, self.size_a[1] as f32);
+
+                    // facteur "fit"
+                    let fit = (panel_rect.width() / tw).min(panel_rect.height() / th);
+
+                    // dimensions finales affichées
+                    let draw_w = tw * fit;
+                    let draw_h = th * fit;
+
+                    // offset pour centrer
+                    let offset_x = (panel_rect.width() - draw_w) * 0.5;
+                    let offset_y = (panel_rect.height() - draw_h) * 0.5;
+
+                    // paramètres GPU
+                    let p = GpuParams {
+                        brightness: self.brightness,
+                        contrast: self.contrast,
+                        saturation: self.saturation,
+                        gamma: self.gamma,
+                        flip_h: self.flip_h as u32,
+                        flip_v: self.flip_v as u32,
+                        rotation: self.rotation,
+                        _pad0: 0,
+                        zoom: fit,
+                        _pad1: 0.0,
+                        tex_w: tw,
+                        tex_h: th,
+                        off_x: offset_x,
+                        off_y: offset_y,
+                        center_u: -1.0,
+                        center_v: -1.0,
+                        rect_min_x: panel_rect.min.x,
+                        rect_min_y: panel_rect.min.y,
+                        rect_max_x: panel_rect.max.x,
+                        rect_max_y: panel_rect.max.y,
+                        ppp: 1.0,
+                        fade_alpha: self.fade_alpha_a, // 🔹 fade dynamique
+                        _pad2: [0.0; 3],
+                        _pad3: [0.0; 4],
+                    };
+
+                    let cb = make_postprocess_paint_callback(
+                        panel_rect,
+                        Arc::clone(pa),
+                        self.size_a,
+                        self.linear_filter,
+                        p,
+                    );
+                    ui.painter().add(cb);
                 }
             });
 
@@ -2829,6 +3001,11 @@ impl eframe::App for App {
                 egui::Slider::new(&mut self.slideshow_interval, 1.0..=30.0)
                     .text("sec.")
                 );
+                
+                ui.add(
+                    egui::Slider::new(&mut self.slideshow_fade_duration, 0.0..=5.0)
+                        .text("Fade")
+                );
             }
     
             // toggle diaporama avec F11
@@ -2839,7 +3016,7 @@ impl eframe::App for App {
 
             ui.separator();
 
-            // --- PATCH: mémorise l'état avant interaction ---
+            // --- mémorise l'état avant interaction ---
             let was_compare_enabled = self.compare_enabled;
             let was_mode = self.compare_mode;
             let was_link = self.link_views;
@@ -2991,14 +3168,10 @@ impl eframe::App for App {
                 ui.add_space(4.0);
                 ui.heading("View");
                 ui.add_space(8.0);
-                // if ui.button("Reset (R)").clicked() || ui.input(|i| i.key_pressed(egui::Key::R)) {
-                //     self.request_fit = true;
-                //     self.fit_allow_upscale = false; // reset fit            
-                //     self.request_center = true;
-                // }
                 ui.horizontal(|ui| {
-                    if ui.button("180°").clicked() {
-                        self.cmd_rotate_180();
+                    if ui.button("⟳90°").clicked() {
+                        self.rotation = (self.rotation + 90) % 360;
+                        self.request_center = true;
                     }
                     if ui.button("↔ Horz.").clicked() {
                         self.cmd_flip_h();
@@ -3014,6 +3187,8 @@ impl eframe::App for App {
                     if ui.checkbox(&mut linear, "").changed() {
                         self.set_linear_filter(ctx, linear);
                     }
+                    ui.label("Fade");
+                    ui.checkbox(&mut self.fade_enabled, "");
                 });
 
                 ui.add_space(8.0);
@@ -3022,9 +3197,10 @@ impl eframe::App for App {
                 {
                     self.bg_gray = bg_i as u8;
                 }
+
                 ui.add_space(8.0);
                 ui.separator();
-                ui.heading("Calibration");
+                ui.heading("Adjustments");
                 ui.add_space(8.0);
                 let (mut b, mut c, mut s, mut g) =
                     (self.brightness, self.contrast, self.saturation, self.gamma);
@@ -3129,8 +3305,6 @@ impl eframe::App for App {
                                 self.new_folder_input.clear();
                             }
                         });
-
-
 
                     ui.add_space(12.0);
                     if ui
@@ -3282,8 +3456,6 @@ impl eframe::App for App {
                 });
         }
 
-
-
         // Panneau central
         egui::CentralPanel::default().show(ctx, |ui| {
             let avail = ui.available_size();
@@ -3315,32 +3487,37 @@ impl eframe::App for App {
                             if self.request_fit {
                                 // A
                                 if self.size_a != [0, 0] {
-                                    let fit_a = (left_rect.width()  / self.size_a[0] as f32)
-                                        .min(left_rect.height() / self.size_a[1] as f32);
+                                    // 🔑 inverser largeur/hauteur si rotation est 90 ou 270
+                                    let (w, h) = if self.rotation % 180 == 0 {
+                                        (self.size_a[0] as f32, self.size_a[1] as f32)
+                                    } else {
+                                        (self.size_a[1] as f32, self.size_a[0] as f32)
+                                    };
+
+                                    let fit_a = (left_rect.width() / w).min(left_rect.height() / h);
                                     let target_a = if self.fit_allow_upscale { fit_a } else { fit_a.min(1.0) };
                                     self.zoom_a = target_a.max(0.05);
 
-                                    let draw_a = egui::Vec2::new(
-                                        self.size_a[0] as f32 * self.zoom_a,
-                                        self.size_a[1] as f32 * self.zoom_a,
-                                    );
+                                    let draw_a = egui::Vec2::new(w * self.zoom_a, h * self.zoom_a);
                                     self.offset_a = 0.5 * (left_rect.size() - draw_a);
                                 } else {
                                     self.zoom_a = 1.0;
                                     self.offset_a = egui::Vec2::ZERO;
                                 }
-
-                                // B
+                                                                // B
                                 if self.size_b != [0, 0] {
-                                    let fit_b = (right_rect.width()  / self.size_b[0] as f32)
-                                        .min(right_rect.height() / self.size_b[1] as f32);
+                                    // 🔑 inverser largeur/hauteur si rotation_b est 90 ou 270
+                                    let (w, h) = if self.rotation % 180 == 0 {
+                                        (self.size_b[0] as f32, self.size_b[1] as f32)
+                                    } else {
+                                        (self.size_b[1] as f32, self.size_b[0] as f32)
+                                    };
+
+                                    let fit_b = (right_rect.width() / w).min(right_rect.height() / h);
                                     let target_b = if self.fit_allow_upscale { fit_b } else { fit_b.min(1.0) };
                                     self.zoom_b = target_b.max(0.05);
 
-                                    let draw_b = egui::Vec2::new(
-                                        self.size_b[0] as f32 * self.zoom_b,
-                                        self.size_b[1] as f32 * self.zoom_b,
-                                    );
+                                    let draw_b = egui::Vec2::new(w * self.zoom_b, h * self.zoom_b);
                                     self.offset_b = 0.5 * (right_rect.size() - draw_b);
                                 } else {
                                     self.zoom_b = 1.0;
@@ -3349,7 +3526,7 @@ impl eframe::App for App {
 
                                 // min_zoom cohérent avec les deux
                                 self.min_zoom = (self.zoom_a.min(self.zoom_b) * 0.001).max(0.005);
-
+                                self.request_center = true;
                                 self.request_fit = false;
                                 ctx.request_repaint();
                             }
@@ -3381,20 +3558,24 @@ impl eframe::App for App {
                             // Center indépendant
                             if self.request_center {
                                 if self.size_a != [0, 0] {
-                                    let draw_a = egui::Vec2::new(
-                                        self.size_a[0] as f32 * self.zoom_a,
-                                        self.size_a[1] as f32 * self.zoom_a,
-                                    );
+                                    let (w, h) = if self.rotation % 180 == 0 {
+                                        (self.size_a[0] as f32, self.size_a[1] as f32)
+                                    } else {
+                                        (self.size_a[1] as f32, self.size_a[0] as f32)
+                                    };
+                                    let draw_a = egui::Vec2::new(w * self.zoom_a, h * self.zoom_a);
                                     self.offset_a = 0.5 * (left_rect.size() - draw_a);
                                 } else {
                                     self.offset_a = egui::Vec2::ZERO;
                                 }
 
                                 if self.size_b != [0, 0] {
-                                    let draw_b = egui::Vec2::new(
-                                        self.size_b[0] as f32 * self.zoom_b,
-                                        self.size_b[1] as f32 * self.zoom_b,
-                                    );
+                                    let (w, h) = if self.rotation % 180 == 0 {
+                                        (self.size_b[0] as f32, self.size_b[1] as f32)
+                                    } else {
+                                        (self.size_b[1] as f32, self.size_b[0] as f32)
+                                    };
+                                    let draw_b = egui::Vec2::new(w * self.zoom_b, h * self.zoom_b);
                                     self.offset_b = 0.5 * (right_rect.size() - draw_b);
                                 } else {
                                     self.offset_b = egui::Vec2::ZERO;
@@ -3408,19 +3589,35 @@ impl eframe::App for App {
                             // ---------- Link ON : ton comportement actuel (partagé) ----------
                             if self.request_fit {
                                 let mut scales: Vec<f32> = vec![];
+
                                 if self.size_a != [0, 0] {
-                                    scales.push((left_rect.width()  / self.size_a[0] as f32)
-                                        .min(left_rect.height() / self.size_a[1] as f32));
+                                    // inverser w/h si rotation A = 90 ou 270
+                                    let (w, h) = if self.rotation % 180 == 0 {
+                                        (self.size_a[0] as f32, self.size_a[1] as f32)
+                                    } else {
+                                        (self.size_a[1] as f32, self.size_a[0] as f32)
+                                    };
+
+                                    scales.push((left_rect.width() / w).min(left_rect.height() / h));
                                 }
+
                                 if self.size_b != [0, 0] {
-                                    scales.push((right_rect.width() / self.size_b[0] as f32)
-                                        .min(right_rect.height() / self.size_b[1] as f32));
+                                    // inverser w/h si rotation B = 90 ou 270
+                                    let (w, h) = if self.rotation % 180 == 0 {
+                                        (self.size_b[0] as f32, self.size_b[1] as f32)
+                                    } else {
+                                        (self.size_b[1] as f32, self.size_b[0] as f32)
+                                    };
+
+                                    scales.push((right_rect.width() / w).min(right_rect.height() / h));
                                 }
+
                                 if let Some(mins) = scales.into_iter().reduce(f32::min) {
                                     let target = if self.fit_allow_upscale { mins } else { mins.min(1.0) };
                                     self.zoom = target.max(0.05);
                                     self.min_zoom = (self.zoom * 0.001).max(0.005);
                                 }
+
                                 self.compare_center_uv = [0.5, 0.5];
                                 self.request_fit = false;
                             }
@@ -3443,16 +3640,25 @@ impl eframe::App for App {
                     _ => {
                         let ref_tex = if self.size_a != [0, 0] { self.size_a } else { self.size_b };
                         if self.request_fit && ref_tex != [0, 0] {
-                            let zx = panel_rect.width()  / ref_tex[0] as f32;
-                            let zy = panel_rect.height() / ref_tex[1] as f32;
+                            // 🔑 inverser w/h si rotation en 90 ou 270
+                            let (w, h) = if self.rotation % 180 == 0 {
+                                (ref_tex[0] as f32, ref_tex[1] as f32)
+                            } else {
+                                (ref_tex[1] as f32, ref_tex[0] as f32)
+                            };
+
+                            let zx = panel_rect.width() / w;
+                            let zy = panel_rect.height() / h;
                             let fit = zx.min(zy);
-                            // si cmd_fit a été demandé : on autorise l'upscale ; sinon on borne à 1.0
+
                             let target = if self.fit_allow_upscale { fit } else { fit.min(1.0) };
-                        
+
                             self.zoom = target.max(0.05);
                             self.min_zoom = (self.zoom * 0.001).max(0.005);
 
-                            self.center_in(panel_rect, ref_tex);
+                            // ⚠️ self.center_in doit aussi recevoir les dimensions corrigées
+                            self.center_in(panel_rect, [w as usize, h as usize]);
+
                             self.request_fit = false;
                         }
                         // 1:1 intelligent
@@ -3469,7 +3675,12 @@ impl eframe::App for App {
                         }
 
                         if self.request_center && ref_tex != [0, 0] {
-                            self.center_in(panel_rect, ref_tex);
+                            let (w, h) = if self.rotation % 180 == 0 {
+                                (ref_tex[0], ref_tex[1])
+                            } else {
+                                (ref_tex[1], ref_tex[0])
+                            };
+                            self.center_in(panel_rect, [w, h]);
                             self.request_center = false;
                         }
                     }
@@ -3491,19 +3702,27 @@ impl eframe::App for App {
                 } else {
                     self.size_b
                 };
-                if self.request_fit && ref_tex != [0, 0] {
-                    let zx = panel_rect.width() / ref_tex[0] as f32;
-                    let zy = panel_rect.height() / ref_tex[1] as f32;
-                    let fit = zx.min(zy);
-                    // si cmd_fit a été demandé : on autorise l'upscale ; sinon on borne à 1.0
-                    let target = if self.fit_allow_upscale { fit } else { fit.min(1.0) };
 
+                if self.request_fit && ref_tex != [0, 0] {
+                     let (w, h) = if self.rotation % 180 == 0 {
+                        (ref_tex[0] as f32, ref_tex[1] as f32)
+                    } else {
+                        (ref_tex[1] as f32, ref_tex[0] as f32)
+                    };
+
+                    let zx = panel_rect.width() / w;
+                    let zy = panel_rect.height() / h;
+                    let fit = zx.min(zy);
+
+                    let target = if self.fit_allow_upscale { fit } else { fit.min(1.0) };
                     self.zoom = target.max(0.05);
                     self.min_zoom = (self.zoom * 0.001).max(0.005);
 
-                    self.center_in(panel_rect, ref_tex);
+                    // ✅ centrage UV plutôt que offset
+                    self.request_center = true;
                     self.request_fit = false;
                 }
+                
                 // 1:1 intelligent en mode simple
                 if self.request_one_to_one && ref_tex != [0, 0] {
                      // VRAI 1:1 : 1 pixel image = 1 pixel écran, recentré, sans upscale forcé
@@ -3516,13 +3735,19 @@ impl eframe::App for App {
 
                     self.request_one_to_one = false;
                 }
+
                 if self.request_center && ref_tex != [0, 0] {
-                    self.center_in(panel_rect, ref_tex);
+                    let (w, h) = if self.rotation % 180 == 0 {
+                        (ref_tex[0], ref_tex[1])
+                    } else {
+                        (ref_tex[1], ref_tex[0])
+                    };
+                    self.center_in(panel_rect, [w, h]);
                     self.request_center = false;
                 }
             }
 
-            // interactions
+            // ====== interactions =======
 
              // Raccourcis navigation
             let left = ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft));
@@ -3625,7 +3850,7 @@ impl eframe::App for App {
             painter.rect_filled(panel_rect, 0.0, egui::Color32::from_gray(self.bg_gray));
 
             // Params GPU
-            let build_params_simple = |tex_size: [usize; 2]| -> GpuParams {
+            let build_params_simple = |tex_size: [usize; 2], fade: f32| -> GpuParams {
                 GpuParams {
                     brightness: self.brightness,
                     contrast: self.contrast,
@@ -3633,7 +3858,7 @@ impl eframe::App for App {
                     gamma: self.gamma,
                     flip_h: self.flip_h as u32,
                     flip_v: self.flip_v as u32,
-                    rot_180: self.rotate_180 as u32,
+                    rotation : self.rotation,
                     _pad0: 0,
                     zoom: self.zoom,
                     _pad1: 0.0,
@@ -3648,35 +3873,9 @@ impl eframe::App for App {
                     rect_max_x: 0.0,
                     rect_max_y: 0.0,
                     ppp: 1.0,
+                    fade_alpha: fade,
                     _pad2: [0.0; 3],
                     _pad3: [0.0; 4],  
-                }
-            };
-            let build_params_compare = |tex_size: [usize; 2]| -> GpuParams {
-                GpuParams {
-                    brightness: self.brightness,
-                    contrast: self.contrast,
-                    saturation: self.saturation,
-                    gamma: self.gamma,
-                    flip_h: self.flip_h as u32,
-                    flip_v: self.flip_v as u32,
-                    rot_180: self.rotate_180 as u32,
-                    _pad0: 0,
-                    zoom: self.zoom,
-                    _pad1: 0.0,
-                    tex_w: tex_size[0] as f32,
-                    tex_h: tex_size[1] as f32,
-                    off_x: 0.0,
-                    off_y: 0.0,
-                    center_u: self.compare_center_uv[0],
-                    center_v: self.compare_center_uv[1],
-                    rect_min_x: 0.0,
-                    rect_min_y: 0.0,
-                    rect_max_x: 0.0,
-                    rect_max_y: 0.0,
-                    ppp: 1.0,
-                    _pad2: [0.0; 3],
-                    _pad3: [0.0; 4],
                 }
             };
 
@@ -3687,12 +3886,17 @@ impl eframe::App for App {
 
                         // A à gauche
                         if let Some(pa) = &self.orig_a {
-                            let mut p = build_params_compare(self.size_a);
+                            let mut p = build_params_simple(self.size_a, self.fade_alpha_a);
                             if self.link_views {
                                 // 🔗 Mode LIÉ : (comportement actuel)
-                                p.off_x = -self.compare_spacing * left_rect.width() * 0.5;   // spacing horizontal A
-                                p.off_y = -self.compare_vertical_offset * left_rect.height() * 0.5; // spacing vertical A
-                                // p.zoom = self.zoom; p.center_u/v = self.compare_center_uv (déjà posés dans build_params_compare)
+                                p.zoom = self.zoom;
+                                p.center_u = -1.0;
+                                p.center_v = -1.0;
+                                // centrage dans left_rect
+                                let draw_w = self.size_a[0] as f32 * p.zoom;
+                                let draw_h = self.size_a[1] as f32 * p.zoom;
+                                p.off_x = 0.5 * (left_rect.width()  - draw_w) - self.compare_spacing * left_rect.width() * 0.5;
+                                p.off_y = 0.5 * (left_rect.height() - draw_h) - self.compare_vertical_offset * left_rect.height() * 0.5;
                             } else {
                                 // 🔓 Mode INDÉPENDANT : pas de center_uv partagé; utiliser zoom_a/offset_a
                                 p.center_u = -1.0;
@@ -3707,12 +3911,16 @@ impl eframe::App for App {
 
                         // B à droite
                          if let Some(pb) = &self.orig_b {
-                            let mut p = build_params_compare(self.size_b);
+                            let mut p = build_params_simple(self.size_b, self.fade_alpha_b);
                             if self.link_views {
-                                // 🔗 Mode LIÉ : (comportement actuel)
-                                p.off_x =  self.compare_spacing * right_rect.width() * 0.5;   // spacing horizontal B
-                                p.off_y =  self.compare_vertical_offset * right_rect.height() * 0.5; // spacing vertical B
-                                // p.zoom = self.zoom; p.center_u/v = self.compare_center_uv
+                                p.zoom = self.zoom;
+                                p.center_u = -1.0;
+                                p.center_v = -1.0;
+
+                                let draw_w = self.size_b[0] as f32 * p.zoom;
+                                let draw_h = self.size_b[1] as f32 * p.zoom;
+                                p.off_x = 0.5 * (right_rect.width()  - draw_w) + self.compare_spacing * right_rect.width() * 0.5;
+                                p.off_y = 0.5 * (right_rect.height() - draw_h) + self.compare_vertical_offset * right_rect.height() * 0.5;
                             } else {
                                 // 🔓 Mode INDÉPENDANT : zoom_b/offset_b
                                 p.center_u = -1.0;
@@ -3731,22 +3939,6 @@ impl eframe::App for App {
                                 egui::pos2(split_x - 0.5, panel_rect.top()),
                                 egui::pos2(split_x + 0.5, panel_rect.bottom()),
                             );
-                            // // zone de saisie plus large pour la souris :
-                            // let handle = egui::Rect::from_min_max(
-                            //     egui::pos2(split_x - 4.0, panel_rect.top()),
-                            //     egui::pos2(split_x + 4.0, panel_rect.bottom()),
-                            // );
-
-                            // // input drag pour déplacer self.compare_split
-                            // let resp = ui.interact(handle, ui.id().with("split_drag"), egui::Sense::click_and_drag());
-                            // if resp.dragged() {
-                            //     let dx = resp.drag_delta().x;
-                            //     let new_split_x = (split_x + dx).clamp(panel_rect.left() + 10.0, panel_rect.right() - 10.0);
-                            //     let t = (new_split_x - panel_rect.left()) / panel_rect.width();
-                            //     self.compare_split = t.clamp(0.05, 0.95); // bornes soft
-                            //     ctx.request_repaint();
-                            // }
-
                             // rendu de la ligne
                             ui.painter().rect_filled(divider, 0.0, egui::Color32::from_white_alpha(180));
                         }
@@ -3810,7 +4002,7 @@ impl eframe::App for App {
                         if phase {
                             // montre A plein cadre
                             if let Some(pa) = &self.orig_a {
-                                let mut p = build_params_simple(self.size_a);
+                                let mut p = build_params_simple(self.size_a, self.fade_alpha_a);
                                 p.rect_min_x = panel_rect.min.x; p.rect_min_y = panel_rect.min.y;
                                 p.rect_max_x = panel_rect.max.x; p.rect_max_y = panel_rect.max.y;
                                 let cb = make_postprocess_paint_callback(panel_rect, Arc::clone(pa), self.size_a, self.linear_filter, p);
@@ -3818,7 +4010,7 @@ impl eframe::App for App {
                             }
                         } else {
                             if let Some(pb) = &self.orig_b {
-                                let mut p = build_params_simple(self.size_b);
+                                let mut p = build_params_simple(self.size_b, self.fade_alpha_b);
                                 p.rect_min_x = panel_rect.min.x; p.rect_min_y = panel_rect.min.y;
                                 p.rect_max_x = panel_rect.max.x; p.rect_max_y = panel_rect.max.y;
                                 let cb = make_postprocess_paint_callback(panel_rect, Arc::clone(pb), self.size_b, self.linear_filter, p);
@@ -3828,7 +4020,7 @@ impl eframe::App for App {
                     }
                     CompareMode::Diff => {
                         if let (Some(pa), Some(pb)) = (&self.orig_a, &self.orig_b) {
-                            let mut p = build_params_simple(self.size_a); // on s'aligne sur A pour zoom/off_x/off_y
+                            let mut p = build_params_simple(self.size_a, self.fade_alpha_a); // on s'aligne sur A pour zoom/off_x/off_y
                             p.rect_min_x = panel_rect.min.x; p.rect_min_y = panel_rect.min.y;
                             p.rect_max_x = panel_rect.max.x; p.rect_max_y = panel_rect.max.y;
                             let cb = make_postprocess_paint_callback_diff(
@@ -3843,11 +4035,11 @@ impl eframe::App for App {
                     }
                 }
             } else if let Some(pa) = &self.orig_a {
-                let p = build_params_simple(self.size_a);
+                let p = build_params_simple(self.size_a, self.fade_alpha_a);
                 let cb = make_postprocess_paint_callback(panel_rect, Arc::clone(pa), self.size_a, self.linear_filter, p);
                 ui.painter().add(cb);
             } else if let Some(pb) = &self.orig_b {
-                let p = build_params_simple(self.size_b);
+                let p = build_params_simple(self.size_b, self.fade_alpha_b);
                 let cb = make_postprocess_paint_callback(panel_rect, Arc::clone(pb), self.size_b, self.linear_filter, p);
                 ui.painter().add(cb);
             } else {
@@ -3958,6 +4150,26 @@ impl eframe::App for App {
             }
 
             self.hist_dirty = false;
+        }
+
+        // 🔹 Gestion du fade-in progressif pour A
+        if self.fade_alpha_a < 1.0 {
+            let dt = ctx.input(|i| i.stable_dt); // temps écoulé depuis la frame précédente
+            self.fade_alpha_a += dt * 2.0; // vitesse du fade (ici ~0.5 sec)
+            if self.fade_alpha_a > 1.0 {
+                self.fade_alpha_a = 1.0;
+            }
+            ctx.request_repaint();
+        }
+
+        // 🔹 Gestion du fade-in progressif pour B
+        if self.fade_alpha_b < 1.0 {
+            let dt = ctx.input(|i| i.stable_dt);
+            self.fade_alpha_b += dt * 2.0;
+            if self.fade_alpha_b > 1.0 {
+                self.fade_alpha_b = 1.0;
+            }
+            ctx.request_repaint();
         }
 
     }
