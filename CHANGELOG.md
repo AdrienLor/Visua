@@ -20,6 +20,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.4.1] – 2025-09-06
+
+### Fixed
+- Correct centering of images in **linked comparison mode** during rotation.  
+- Fade-in effect now works consistently across modes (slideshow and normal view).  
+
+### Changed
+- Rotation and mirroring logic cleaned up, with reset option available.  
+- Removed unused `build_params_compare` path (simplified GPU pipeline).
+  
+---
+
 ## [1.4.0] – 2025-09-01
 
 ### Added
