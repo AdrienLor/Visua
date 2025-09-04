@@ -5,7 +5,7 @@ winres = "0.1"
 [package]
 build = "build.rs"
 name = "visua"
-version = "1.4.0"
+version = "1.4.1"
 authors = ["AdrienLor"]
 edition = "2024"
 
