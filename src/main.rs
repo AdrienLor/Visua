@@ -2030,7 +2030,7 @@ impl Default for App {
             fade_start_a : None,
             fade_start_b : None,
             fade_enabled : true,
-            slideshow_fade_duration : 2.0,        
+            slideshow_fade_duration : 0.65,        
         }
     }
 }
@@ -2064,7 +2064,7 @@ impl App {
 
     fn set_status_message(&mut self, msg: &str, color: egui::Color32, duration: f32) {
         self.status_message = Some((msg.to_string(), color));
-        self.status_timer = duration; // ex: 3.0 secondes
+        self.status_timer = duration; 
     }
 
     /// Déplace l'image courante (A) dans <dossier>/Visua_bin/ en générant un nom unique si besoin,
@@ -2652,7 +2652,7 @@ impl eframe::App for App {
         let fade_duration = if self.slideshow_mode {
             self.slideshow_fade_duration.max(0.01)
         } else if self.fade_enabled {
-            0.25 // fade rapide hors slideshow
+            0.33 // fade rapide hors slideshow
         } else {
             0.0 // pas de fade
         };
@@ -4042,16 +4042,7 @@ impl eframe::App for App {
                 let p = build_params_simple(self.size_b, self.fade_alpha_b);
                 let cb = make_postprocess_paint_callback(panel_rect, Arc::clone(pb), self.size_b, self.linear_filter, p);
                 ui.painter().add(cb);
-            } else {
-                // message vide
-                painter.text(
-                    panel_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    "Open image A — then B to activate the comparison.",
-                    egui::TextStyle::Heading.resolve(ui.style()),
-                    egui::Color32::from_gray(180),
-                );
-            }
+            } 
             // barre d'état
             let status_rect = Rect::from_min_size(
                 panel_rect.left_bottom() - Vec2::new(0.0, 24.0),
