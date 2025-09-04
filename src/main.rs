@@ -2064,7 +2064,7 @@ impl App {
 
     fn set_status_message(&mut self, msg: &str, color: egui::Color32, duration: f32) {
         self.status_message = Some((msg.to_string(), color));
-        self.status_timer = duration; 
+        self.status_timer = duration; // ex: 3.0 secondes
     }
 
     /// Déplace l'image courante (A) dans <dossier>/Visua_bin/ en générant un nom unique si besoin,
@@ -2652,7 +2652,7 @@ impl eframe::App for App {
         let fade_duration = if self.slideshow_mode {
             self.slideshow_fade_duration.max(0.01)
         } else if self.fade_enabled {
-            0.33 // fade rapide hors slideshow
+            0.30// fade rapide hors slideshow
         } else {
             0.0 // pas de fade
         };
@@ -3179,6 +3179,12 @@ impl eframe::App for App {
                     if ui.button("↕ Vert.").clicked() {
                         self.cmd_flip_v();
                     }
+                    if ui.button("Reset").clicked() {
+                        self.rotation = 0;
+                        self.flip_h = false;
+                        self.flip_v = false;
+                        self.request_center = true;
+                    }
                 });
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -3591,24 +3597,20 @@ impl eframe::App for App {
                                 let mut scales: Vec<f32> = vec![];
 
                                 if self.size_a != [0, 0] {
-                                    // inverser w/h si rotation A = 90 ou 270
                                     let (w, h) = if self.rotation % 180 == 0 {
                                         (self.size_a[0] as f32, self.size_a[1] as f32)
                                     } else {
                                         (self.size_a[1] as f32, self.size_a[0] as f32)
                                     };
-
                                     scales.push((left_rect.width() / w).min(left_rect.height() / h));
                                 }
 
                                 if self.size_b != [0, 0] {
-                                    // inverser w/h si rotation B = 90 ou 270
                                     let (w, h) = if self.rotation % 180 == 0 {
                                         (self.size_b[0] as f32, self.size_b[1] as f32)
                                     } else {
                                         (self.size_b[1] as f32, self.size_b[0] as f32)
                                     };
-
                                     scales.push((right_rect.width() / w).min(right_rect.height() / h));
                                 }
 
@@ -3616,9 +3618,20 @@ impl eframe::App for App {
                                     let target = if self.fit_allow_upscale { mins } else { mins.min(1.0) };
                                     self.zoom = target.max(0.05);
                                     self.min_zoom = (self.zoom * 0.001).max(0.005);
+
+                                    // 🔑 RECALCULER LE CENTRAGE ICI
+                                    let (w, h) = if self.rotation % 180 == 0 {
+                                        (self.size_a[0] as f32, self.size_a[1] as f32)
+                                    } else {
+                                        (self.size_a[1] as f32, self.size_a[0] as f32)
+                                    };
+                                    let tw = w as f32 * self.zoom;
+                                    let th = h as f32 * self.zoom;
+                                    let offset_x = (panel_rect.width() - tw) * 0.5;
+                                    let offset_y = (panel_rect.height() - th) * 0.5;
+                                    self.offset = egui::vec2(offset_x, offset_y);
                                 }
 
-                                self.compare_center_uv = [0.5, 0.5];
                                 self.request_fit = false;
                             }
 
@@ -3887,48 +3900,55 @@ impl eframe::App for App {
                         // A à gauche
                         if let Some(pa) = &self.orig_a {
                             let mut p = build_params_simple(self.size_a, self.fade_alpha_a);
+
                             if self.link_views {
-                                // 🔗 Mode LIÉ : (comportement actuel)
+                                // 🔗 Mode LIÉ → zoom partagé
+                                let (w, h) = if self.rotation % 180 == 0 {
+                                    (self.size_a[0] as f32, self.size_a[1] as f32)
+                                } else {
+                                    (self.size_a[1] as f32, self.size_a[0] as f32)
+                                };
+                                let draw = egui::vec2(w * self.zoom, h * self.zoom);
+                                let offset = 0.5 * (left_rect.size() - draw);
+
                                 p.zoom = self.zoom;
-                                p.center_u = -1.0;
-                                p.center_v = -1.0;
-                                // centrage dans left_rect
-                                let draw_w = self.size_a[0] as f32 * p.zoom;
-                                let draw_h = self.size_a[1] as f32 * p.zoom;
-                                p.off_x = 0.5 * (left_rect.width()  - draw_w) - self.compare_spacing * left_rect.width() * 0.5;
-                                p.off_y = 0.5 * (left_rect.height() - draw_h) - self.compare_vertical_offset * left_rect.height() * 0.5;
+                                p.off_x = offset.x - self.compare_spacing * left_rect.width() * 0.5;
+                                p.off_y = offset.y - self.compare_vertical_offset * left_rect.height() * 0.5;
                             } else {
-                                // 🔓 Mode INDÉPENDANT : pas de center_uv partagé; utiliser zoom_a/offset_a
-                                p.center_u = -1.0;
-                                p.center_v = -1.0;
+                                // 🔓 Mode indépendant
                                 p.zoom = self.zoom_a;
                                 p.off_x = self.offset_a.x - self.compare_spacing * left_rect.width() * 0.5;
                                 p.off_y = self.offset_a.y - self.compare_vertical_offset * left_rect.height() * 0.5;
                             }
+
                             let cb = make_postprocess_paint_callback(left_rect, Arc::clone(pa), self.size_a, self.linear_filter, p);
                             ui.painter().add(cb);
                         }
 
                         // B à droite
-                         if let Some(pb) = &self.orig_b {
+                        if let Some(pb) = &self.orig_b {
                             let mut p = build_params_simple(self.size_b, self.fade_alpha_b);
-                            if self.link_views {
-                                p.zoom = self.zoom;
-                                p.center_u = -1.0;
-                                p.center_v = -1.0;
 
-                                let draw_w = self.size_b[0] as f32 * p.zoom;
-                                let draw_h = self.size_b[1] as f32 * p.zoom;
-                                p.off_x = 0.5 * (right_rect.width()  - draw_w) + self.compare_spacing * right_rect.width() * 0.5;
-                                p.off_y = 0.5 * (right_rect.height() - draw_h) + self.compare_vertical_offset * right_rect.height() * 0.5;
+                            if self.link_views {
+                                // 🔗 Mode LIÉ → zoom partagé
+                                let (w, h) = if self.rotation % 180 == 0 {
+                                    (self.size_b[0] as f32, self.size_b[1] as f32)
+                                } else {
+                                    (self.size_b[1] as f32, self.size_b[0] as f32)
+                                };
+                                let draw = egui::vec2(w * self.zoom, h * self.zoom);
+                                let offset = 0.5 * (right_rect.size() - draw);
+
+                                p.zoom = self.zoom;
+                                p.off_x = offset.x + self.compare_spacing * right_rect.width() * 0.5;
+                                p.off_y = offset.y + self.compare_vertical_offset * right_rect.height() * 0.5;
                             } else {
-                                // 🔓 Mode INDÉPENDANT : zoom_b/offset_b
-                                p.center_u = -1.0;
-                                p.center_v = -1.0;
+                                // 🔓 Mode indépendant
                                 p.zoom = self.zoom_b;
                                 p.off_x = self.offset_b.x + self.compare_spacing * right_rect.width() * 0.5;
                                 p.off_y = self.offset_b.y + self.compare_vertical_offset * right_rect.height() * 0.5;
                             }
+
                             let cb = make_postprocess_paint_callback(right_rect, Arc::clone(pb), self.size_b, self.linear_filter, p);
                             ui.painter().add(cb);
                         }
@@ -4042,7 +4062,16 @@ impl eframe::App for App {
                 let p = build_params_simple(self.size_b, self.fade_alpha_b);
                 let cb = make_postprocess_paint_callback(panel_rect, Arc::clone(pb), self.size_b, self.linear_filter, p);
                 ui.painter().add(cb);
-            } 
+            } else {
+                // message vide
+                painter.text(
+                    panel_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "",
+                    egui::TextStyle::Heading.resolve(ui.style()),
+                    egui::Color32::from_gray(180),
+                );
+            }
             // barre d'état
             let status_rect = Rect::from_min_size(
                 panel_rect.left_bottom() - Vec2::new(0.0, 24.0),
@@ -4092,7 +4121,6 @@ impl eframe::App for App {
                 ctx.request_repaint();
             }
         }
-
 
        // Histogrammes (A et B)
         if self.hist_dirty {
