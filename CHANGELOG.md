@@ -20,6 +20,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.4.0] – 2025-09-01
+
+### Added
+- 🌫 **Fade-in transitions** for images:
+  - On / off in normal viewing mode (fixed duration 0.25s).  
+  - Configurable fade duration (0–6s) in slideshow mode via slider.  
+- 🔄 **Rotation by 90° increments** (replaces fixed 180° toggle).  
+- ⚖ **Adjustments** grouping brightness, contrast, saturation, gamma.  
+- ⚙ New **"Fade" toggle** in the options panel (enable/disable fade outside slideshow).  
+- 📊 **Properties & EXIF panels**: now true modal windows (block background interactions).  
+
+### Changed
+- 🎞 **Slideshow mode**:
+  - Images now fade smoothly between transitions.  
+  - Centered fit by default, keeping fullscreen clarity.  
+- 🔁 **Comparison modes**:
+  - Improved centering & fit logic for 90°/270° rotated images.  
+  - Better alpha handling in blink & diff modes.  
+- 🔧 UI refinements:  
+  - About button placement improved (bottom-right).
+  - More compact layout, more space for the main view panel  
+
+### Fixed
+- ✅ **Image centering issues** in linked comparison mode.  
+- ✅ Prevented "ghost frames" when swapping textures asynchronously.  
+- ✅ Slideshow now blocks all background interactions reliably.  
+- ✅ Minor repaint bugs in blink mode resolved.  
+
+---
+
 ## [1.3.0] – 2025-08-31
 
 ### Added
@@ -97,7 +127,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/your-org/visua/compare/v1.3.0...HEAD  
+[Unreleased]: https://github.com/your-org/visua/compare/v1.4.0...HEAD  
+[1.4.0]: https://github.com/your-org/visua/compare/v1.3.0...v1.4.0  
 [1.3.0]: https://github.com/your-org/visua/compare/v1.2.0...v1.3.0  
 [1.2.0]: https://github.com/your-org/visua/compare/v1.1.0...v1.2.0  
 [1.1.0]: https://github.com/your-org/visua/compare/v1.0.0...v1.1.0  
