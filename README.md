@@ -23,6 +23,13 @@
 
 ---
 
+## HotFixe (v.1.4.1)
+
+- Correct centering of images in **linked comparison mode** during rotation.  
+- Fade-in effect now works consistently across modes (slideshow and normal view).  
+- Rotation and mirroring logic cleaned up, with reset option available.  
+- Removed unused `build_params_compare` path (simplified GPU pipeline).  
+
 ## What’s new (v1.4.0)
 
 - **Smooth fade-in transitions** when loading images  
@@ -33,7 +40,7 @@
 - **Better centering & fit logic** with rotated images  
 - **Modal windows** for properties and about panel, blocking background interactions  
 - **Improved comparison tools**: blink and diff modes polished, with proper centering and alpha handling  
-- **Minor UI refinements 
+- **Minor UI refinements
 
 See the full [Changelog](CHANGELOG.md) for details.
 
