@@ -31,5 +31,3 @@ iconutil -c icns "$ICONSET" -o "${BASENAME}.icns"
 
 # Nettoie le dossier temporaire
 rm -rf "$ICONSET"
-
-echo "✅ Icône générée : ${BASENAME}.icn
