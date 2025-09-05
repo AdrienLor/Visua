@@ -1062,6 +1062,7 @@ struct GpuParams {
     center_v:   f32,
     rect_min_x: f32, rect_min_y: f32,
     rect_max_x: f32, rect_max_y: f32,
+    overlay_alpha: f32,
     ppp:        f32,
     fade_alpha: f32,
     _pad2:      [f32; 3],   // garde l’alignement (vec3 côté WGSL)
@@ -1088,6 +1089,7 @@ struct Params {
     center_v:   f32,
     rect_min_x: f32, rect_min_y: f32,
     rect_max_x: f32, rect_max_y: f32,
+    overlay_alpha: f32,
     ppp:        f32,
     fade_alpha: f32,
     _pad2:      vec3<f32>,
@@ -1218,6 +1220,7 @@ struct Params {
     center_v:   f32,
     rect_min_x: f32, rect_min_y: f32,
     rect_max_x: f32, rect_max_y: f32,
+    overlay_alpha: f32,
     ppp:        f32,
     fade_alpha: f32,
     _pad2:      vec3<f32>,
@@ -1318,6 +1321,145 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     diff = clamp01(diff * vec3<f32>(1.0));
     let out_rgb = apply_bcs_gamma(diff);
     return vec4<f32>(out_rgb, 1.0);
+}
+"#;
+
+const POST_WGSL_OVERLAY: &str = r#"
+struct Params {
+    brightness: f32,
+    contrast:   f32,
+    saturation: f32,
+    gamma:      f32,
+    flip_h:     u32,
+    flip_v:     u32,
+    rotation:   u32,
+    _pad0:      u32,
+    zoom:       f32,
+    _pad1:      f32,
+    tex_w:      f32,
+    tex_h:      f32,
+    off_x:      f32,
+    off_y:      f32,
+    center_u:   f32,
+    center_v:   f32,
+    rect_min_x: f32, rect_min_y: f32,
+    rect_max_x: f32, rect_max_y: f32,
+    overlay_alpha: f32,
+    ppp:           f32,
+    fade_alpha:    f32,
+    _pad2:         vec3<f32>,
+};
+
+@group(0) @binding(0) var samp: sampler;
+@group(0) @binding(1) var texA: texture_2d<f32>;
+@group(0) @binding(2) var texB: texture_2d<f32>;
+@group(0) @binding(3) var<uniform> P: Params;
+
+struct VSOut { @builtin(position) pos: vec4<f32>, };
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VSOut {
+    var positions = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 3.0, -1.0),
+        vec2<f32>(-1.0,  3.0),
+    );
+    var out: VSOut;
+    out.pos = vec4<f32>(positions[vid], 0.0, 1.0);
+    return out;
+}
+
+fn clamp01(v: vec3<f32>) -> vec3<f32> { return clamp(v, vec3<f32>(0.0), vec3<f32>(1.0)); }
+fn apply_bcs_gamma(rgb: vec3<f32>) -> vec3<f32> {
+    var c = rgb + vec3<f32>(P.brightness);
+    c = (c - vec3<f32>(0.5)) * vec3<f32>(P.contrast) + vec3<f32>(0.5);
+    let l = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+    c = mix(vec3<f32>(l), c, vec3<f32>(P.saturation));
+    c = clamp01(c);
+    // NB: dans ton DIFF, gamma est appliqué comme pow(c, gamma). Ici je reprends même convention :
+    c = pow(c, vec3<f32>(max(P.gamma, 1e-6)));
+    return clamp01(c);
+}
+
+@fragment
+fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
+    // pixels -> points (comme dans DIFF)
+    let fx = frag_pos.x / P.ppp;
+    let fy = frag_pos.y / P.ppp;
+
+    // repère local au rectangle de dessin (en points)
+    let rx = fx - P.rect_min_x;
+    let ry = fy - P.rect_min_y;
+    let rw = max(P.rect_max_x - P.rect_min_x, 1e-6);
+    let rh = max(P.rect_max_y - P.rect_min_y, 1e-6);
+
+    // taille texture visible selon zoom + rotation (identique à DIFF)
+    var tw: f32;
+    var th: f32;
+    if (P.rotation == 90u || P.rotation == 270u) {
+        tw = max(P.tex_h * P.zoom, 1e-6);
+        th = max(P.tex_w * P.zoom, 1e-6);
+    } else {
+        tw = max(P.tex_w * P.zoom, 1e-6);
+        th = max(P.tex_h * P.zoom, 1e-6);
+    }
+
+    // UV avant flip/rotation (identique à DIFF)
+    var u: f32;
+    var v: f32;
+
+    if (P.center_u >= 0.0) {
+        // centrage par UV (identique à DIFF)
+        let cx = rw * 0.5 + P.off_x;
+        let cy = rh * 0.5 + P.off_y;
+        let tlx = cx - P.center_u * tw;
+        let tly = cy - P.center_v * th;
+        u = (rx - tlx) / tw;
+        v = (ry - tly) / th;
+    } else {
+        // centrage classique offset/zoom
+        u = (rx - P.off_x) / tw;
+        v = (ry - P.off_y) / th;
+    }
+
+    // flips (identiques à DIFF)
+    if (P.flip_h == 1u) { u = 1.0 - u; }
+    if (P.flip_v == 1u) { v = 1.0 - v; }
+
+    // rotation (identique à DIFF)
+    var uu = u;
+    var vv = v;
+    if (P.rotation == 90u) {
+        let tmp = uu; uu = vv; vv = 1.0 - tmp;
+    } else if (P.rotation == 180u) {
+        uu = 1.0 - uu; vv = 1.0 - vv;
+    } else if (P.rotation == 270u) {
+        let tmp = uu; uu = 1.0 - vv; vv = tmp;
+    }
+
+    // hors [0,1] => transparent (comme DIFF)
+    let inside = (uu >= 0.0) && (uu <= 1.0) && (vv >= 0.0) && (vv <= 1.0);
+    if (!inside) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+
+    // clamp aux bords
+    let U = clamp(uu, 0.0, 1.0);
+    let V = clamp(vv, 0.0, 1.0);
+
+    // échantillonnage A/B (Rgba8UnormSrgb -> lin auto)
+    var colA = textureSample(texA, samp, vec2<f32>(U, V)).rgb;
+    var colB = textureSample(texB, samp, vec2<f32>(U, V)).rgb;
+
+    // MIX A/B avec alpha overlay
+    let a = clamp(P.overlay_alpha, 0.0, 1.0);
+    var col = mix(colA, colB, a);
+
+    // post-traitement (brightness/contrast/saturation/gamma) UNE fois après mix
+    col = apply_bcs_gamma(col);
+
+    // fade-in global comme ailleurs
+    return vec4<f32>(col, 1.0) * P.fade_alpha;
 }
 "#;
 
@@ -1557,6 +1699,207 @@ impl egui_wgpu::CallbackTrait for PostProcessCbDiff {
     }
 }
 
+struct PostProcessCbOverlay {
+    pixels_a: Arc<Vec<u8>>,
+    size_a: [u32; 2],
+    pixels_b: Arc<Vec<u8>>,
+    size_b: [u32; 2],
+    params: GpuParams,
+    linear: bool,
+    gpu: Mutex<Option<GpuStuff2>>,
+}
+
+impl PostProcessCbOverlay {
+    fn new(pa: Arc<Vec<u8>>, sa: [usize; 2], pb: Arc<Vec<u8>>, sb: [usize; 2], params: GpuParams, linear: bool) -> Self {
+        Self {
+            pixels_a: pa,
+            size_a: [sa[0] as u32, sa[1] as u32],
+            pixels_b: pb,
+            size_b: [sb[0] as u32, sb[1] as u32],
+            params,
+            linear,
+            gpu: Mutex::new(None),
+        }
+    }
+}
+
+impl egui_wgpu::CallbackTrait for PostProcessCbOverlay {
+    fn prepare(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        screen_desc: &egui_wgpu::ScreenDescriptor,
+        _encoder: &mut wgpu::CommandEncoder,
+        _resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        let mut guard = self.gpu.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
+            // textures A et B
+            let make_tex = |size: [u32;2]| -> wgpu::Texture {
+                device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("uv_overlay_tex"),
+                    size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm, // non-sRGB
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                })
+            };
+            let tex_a = make_tex(self.size_a);
+            let tex_b = make_tex(self.size_b);
+
+            // upload
+            queue.write_texture(
+                wgpu::ImageCopyTexture { texture: &tex_a, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                &self.pixels_a,
+                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * self.size_a[0]), rows_per_image: Some(self.size_a[1]) },
+                wgpu::Extent3d { width: self.size_a[0], height: self.size_a[1], depth_or_array_layers: 1 },
+            );
+            queue.write_texture(
+                wgpu::ImageCopyTexture { texture: &tex_b, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                &self.pixels_b,
+                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * self.size_b[0]), rows_per_image: Some(self.size_b[1]) },
+                wgpu::Extent3d { width: self.size_b[0], height: self.size_b[1], depth_or_array_layers: 1 },
+            );
+
+            let view_a = tex_a.create_view(&wgpu::TextureViewDescriptor::default());
+            let view_b = tex_b.create_view(&wgpu::TextureViewDescriptor::default());
+
+            let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("uv_sampler_diff"),
+                mag_filter: if self.linear { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest },
+                min_filter: if self.linear { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest },
+                mipmap_filter: wgpu::FilterMode::Nearest,
+                ..Default::default()
+            });
+
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("post_shader_overlay"),
+                source: wgpu::ShaderSource::Wgsl(POST_WGSL_OVERLAY.into()),
+            });
+
+            // BGL: samp, texA, texB, UBO
+            let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("post_bgl_overlay"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: std::num::NonZeroU64::new(std::mem::size_of::<GpuParams>() as u64),
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+            let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("post_pl_overlay"),
+                bind_group_layouts: &[&bgl],
+                push_constant_ranges: &[],
+            });
+
+            let target_format = wgpu::TextureFormat::Bgra8Unorm; // doit matcher egui
+            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("post_pipeline_overlay"),
+                layout: Some(&pl),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: "vs_main",
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: "fs_main",
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target_format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+
+            let ubo = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("post_ubo_overlay"),
+                size: std::mem::size_of::<GpuParams>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("post_bind_overlay"),
+                layout: &bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Sampler(&sampler) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view_a) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&view_b) },
+                    wgpu::BindGroupEntry { binding: 3, resource: ubo.as_entire_binding() },
+                ],
+            });
+
+            *guard = Some(GpuStuff2 { pipeline, bind_group: bind, ubo, _tex_a: tex_a, _tex_b: tex_b });
+        }
+
+        if let Some(gpu) = guard.as_ref() {
+            let mut p = self.params;
+            p.ppp = screen_desc.pixels_per_point;
+            queue.write_buffer(&gpu.ubo, 0, bytemuck::bytes_of(&p));
+        }
+        Vec::new()
+    }
+
+    fn paint(&self, info: egui::PaintCallbackInfo, rpass: &mut wgpu::RenderPass<'static>, _resources: &egui_wgpu::CallbackResources) {
+        if let Some(gpu) = self.gpu.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            let Some((left, top, width, height)) = scissor_from_info(&info) else {
+                return; // hors viewport ou zone nulle
+            };
+            rpass.set_scissor_rect(left, top, width, height);
+
+            rpass.set_pipeline(&gpu.pipeline);
+            rpass.set_bind_group(0, &gpu.bind_group, &[]);
+            rpass.draw(0..3, 0..1);
+        }
+    }
+}
+
+
 impl egui_wgpu::CallbackTrait for PostProcessCb {
     fn prepare(
         &self,
@@ -1781,20 +2124,45 @@ fn make_postprocess_paint_callback_diff(
     px_b: Arc<Vec<u8>>, size_b: [usize; 2],
     linear: bool,
     mut params: GpuParams,
+    ) -> egui::PaintCallback {
+        params.rect_min_x = rect.min.x;
+        params.rect_min_y = rect.min.y;
+        params.rect_max_x = rect.max.x;
+        params.rect_max_y = rect.max.y;
+        let cb = PostProcessCbDiff::new(px_a, size_a, px_b, size_b, params, linear);
+        WgpuCallback::new_paint_callback(rect, cb)
+}
+
+fn make_postprocess_paint_callback_overlay(
+    rect: egui::Rect,
+    px_a: Arc<Vec<u8>>, size_a: [usize; 2],
+    px_b: Arc<Vec<u8>>, size_b: [usize; 2],
+    linear: bool,
+    mut params: GpuParams,
 ) -> egui::PaintCallback {
+    // — rect de dessin en points (obligatoire pour calculer rx,ry,rw,rh côté shader)
     params.rect_min_x = rect.min.x;
     params.rect_min_y = rect.min.y;
     params.rect_max_x = rect.max.x;
     params.rect_max_y = rect.max.y;
-    let cb = PostProcessCbDiff::new(px_a, size_a, px_b, size_b, params, linear);
-    WgpuCallback::new_paint_callback(rect, cb)
+
+    // — très important : référencer la texture A (fit/zoom/center basés sur A)
+    params.tex_w = size_a[0] as f32;
+    params.tex_h = size_a[1] as f32;
+
+    // ⚠️ NE PAS toucher ici à ppp : il sera alimenté depuis screen_desc dans prepare()
+
+    // — créer le callback
+    let cb = PostProcessCbOverlay::new(px_a, size_a, px_b, size_b, params, linear);
+    egui_wgpu::Callback::new_paint_callback(rect, cb)
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum CompareMode {
     Split,
     Blink,
-    Diff,  
+    Diff,
+    Overlay,  
 }
 
 impl CompareMode {
@@ -1804,7 +2172,7 @@ impl CompareMode {
             CompareMode::Split => "Side/Side",
             CompareMode::Blink => "Blink",
             CompareMode::Diff  => "Diff",
-            // CompareMode::Overlay => "Overlay",      
+            CompareMode::Overlay => "Overlay",      
             // CompareMode::Swipe   => "Swipe",        
         }
     }
@@ -1917,7 +2285,8 @@ struct App {
     compare_mode: CompareMode,   
     compare_split: f32,
     compare_center_uv: [f32; 2],
-    blink_hz: f32,               
+    blink_hz: f32,
+    overlay_alpha: f32, // 0.0–1.0            
 
     compare_spacing: f32, //espace entre les images (horz)
     compare_vertical_offset : f32, //espace entre les images (vert) avec cisaillement de A par rapport à B
@@ -2053,7 +2422,8 @@ impl Default for App {
             compare_mode: CompareMode::Split,   // par défaut on reste en Split
             compare_split: 0.5,
             compare_center_uv: [0.5, 0.5],
-            blink_hz: 2.0,                       // 2 Hz confortable
+            blink_hz: 2.0,              // Hz
+            overlay_alpha : 0.5,
 
             compare_spacing: 0.0,
             compare_vertical_offset : 0.0,
@@ -2096,7 +2466,6 @@ impl Default for App {
 }
 
 impl App {
-
     fn refresh_subfolders(&mut self) {
         self.subfolders.clear();
 
@@ -2872,6 +3241,7 @@ impl eframe::App for App {
                         rect_min_y: panel_rect.min.y,
                         rect_max_x: panel_rect.max.x,
                         rect_max_y: panel_rect.max.y,
+                        overlay_alpha : 0.5,
                         ppp: 1.0,
                         fade_alpha: self.fade_alpha_a, // 🔹 fade dynamique
                         _pad2: [0.0; 3],
@@ -3099,7 +3469,7 @@ impl eframe::App for App {
                                 ui.selectable_value(&mut self.compare_mode, CompareMode::Split, "Side/Side");
                                 ui.selectable_value(&mut self.compare_mode, CompareMode::Blink, "Blink");
                                 ui.selectable_value(&mut self.compare_mode, CompareMode::Diff,  "Diff");
-                                // ui.selectable_value(&mut self.compare_mode, CompareMode::Overlay, "Overlay");
+                                ui.selectable_value(&mut self.compare_mode, CompareMode::Overlay, "Overlay");
                                 // ui.selectable_value(&mut self.compare_mode, CompareMode::Swipe,   "Swipe");
                             });
 
@@ -3173,6 +3543,10 @@ impl eframe::App for App {
                                 self.request_center = true;
                                 ui.ctx().request_repaint();
                             }
+                        }
+                        CompareMode::Overlay => {
+                             ui.add(egui::Slider::new(&mut self.overlay_alpha, 0.0..=1.0)
+                            .text("Opacity B"));
                         }
                     }
                 }
@@ -3413,8 +3787,6 @@ impl eframe::App for App {
                     }
                     
                 });
-              
-
             });
         }
 
@@ -3549,7 +3921,6 @@ impl eframe::App for App {
                 return; // fenêtre trop petite / redimensionnement -> pas de dessin
             }
 
-            // split pour comparaison
             // split pour comparaison (évite les extrêmes 0.0 / 1.0)
             let mut s = self.compare_split.clamp(0.0, 1.0);
             let eps = 0.001;
@@ -3727,6 +4098,7 @@ impl eframe::App for App {
                             }
                         }
                     }
+
                     // Blink et Diff: fit comme en mode normal, sur tout le panel
                     _ => {
                         let ref_tex = if self.size_a != [0, 0] { self.size_a } else { self.size_b };
@@ -3963,6 +4335,7 @@ impl eframe::App for App {
                     rect_min_y: 0.0,
                     rect_max_x: 0.0,
                     rect_max_y: 0.0,
+                    overlay_alpha: 0.5,
                     ppp: 1.0,
                     fade_alpha: fade,
                     _pad2: [0.0; 3],
@@ -4131,7 +4504,33 @@ impl eframe::App for App {
                             ui.painter().add(cb);
                         }
                     }
-                }
+                    CompareMode::Overlay => {
+                        if let (Some(pa), Some(pb)) = (&self.orig_a, &self.orig_b) {
+                            
+                            // --- 3) Construire les params pour le shader Overlay (référentiel A) ---
+                            let mut p = build_params_simple(self.size_a, self.fade_alpha_a);
+
+                            // rect de dessin (points UI)
+                            p.rect_min_x = panel_rect.min.x;
+                            p.rect_min_y = panel_rect.min.y;
+                            p.rect_max_x = panel_rect.max.x;
+                            p.rect_max_y = panel_rect.max.y;
+
+                            // alpha overlay (UI)
+                            p.overlay_alpha = self.overlay_alpha;
+
+                            // --- 4) Callback GPU ---
+                            let cb = make_postprocess_paint_callback_overlay(
+                                panel_rect,
+                                Arc::clone(pa), self.size_a,  // A = référentiel UV
+                                Arc::clone(pb), self.size_b,  // B = overlay
+                                self.linear_filter,
+                                p,
+                            );
+                            ui.painter().add(cb);
+                        }
+                    }
+                 }
             } else if let Some(pa) = &self.orig_a {
                 let p = build_params_simple(self.size_a, self.fade_alpha_a);
                 let cb = make_postprocess_paint_callback(panel_rect, Arc::clone(pa), self.size_a, self.linear_filter, p);
