@@ -4,14 +4,12 @@
 // uses
 use egui::{IconData, RichText};
 use bytemuck::{Pod, Zeroable};
-use std::{time::Duration};
 use eframe::{
     egui,
     egui::{Pos2, Rect, Sense, UiBuilder, Vec2},
     egui_wgpu,
 };
-use eframe::egui_wgpu::wgpu;
-use eframe::egui_wgpu::Callback as WgpuCallback;
+use eframe::egui_wgpu::{Callback as WgpuCallback, wgpu};
 use rfd::FileDialog;
 use std::{
     fs,
@@ -20,13 +18,12 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     sync::mpsc::{channel, Sender, Receiver},
-    thread,
-    time::Instant,
+    thread::{self, JoinHandle},
+    time::{Instant, Duration},
+    collections::HashMap,
 };
 use num_cpus;
-
 use exif;
-use std::collections::HashMap;
 
 fn install_panic_hook_once() {
     static ONCE: std::sync::Once = std::sync::Once::new();
@@ -41,7 +38,6 @@ fn install_panic_hook_once() {
     });
 }
 
-
 //=================ASYNC=====================
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct ReqId(u64);
@@ -50,14 +46,16 @@ struct ReqId(u64);
 enum Target {
     MainPaneA,
     MainPaneB,
-    // (plus tard) Thumb(usize),
 }
 
-struct Job {
-    id: ReqId,
-    path: PathBuf,
-    target: Target,
-    max_side: u32, // côté max à charger (réduit le coût d’upload GPU)
+enum Job {
+    Load {
+        id: ReqId,
+        path: PathBuf,
+        target: Target,
+        max_side: u32,
+    },
+    Quit,
 }
 
 enum JobResult {
@@ -65,7 +63,7 @@ enum JobResult {
         id: ReqId,
         target: Target,
         size: [usize; 2],
-        rgba: Arc<Vec<u8>>, // RGBA8 prêt pour ColorImage
+        rgba: Arc<Vec<u8>>, 
     },
     Err {
         id: ReqId,
@@ -74,59 +72,89 @@ enum JobResult {
     },
 }
 
-
 struct Loader {
     tx: Sender<Job>,
     rx: Receiver<JobResult>,
+    workers: Vec<JoinHandle<()>>,
 }
 
-fn start_loader(_num_threads: usize) -> Loader {
+impl Drop for Loader {
+    fn drop(&mut self) {
+        // Envoyer autant de Quit que de workers
+        for _ in 0..self.workers.len() {
+            let _ = self.tx.send(Job::Quit);
+        }
+        // Fermer l’émetteur pour débloquer d’éventuels recv
+        let _ = &self.tx;
+        // Rejoindre les threads
+        for h in self.workers.drain(..) {
+            let _ = h.join();
+        }
+    }
+}
+
+fn start_loader(num_threads: usize) -> Loader {
     let (tx_job, rx_job) = channel::<Job>();
     let (tx_res, rx_res) = channel::<JobResult>();
-    
-        thread::spawn(move || {
-            while let Ok(job) = rx_job.recv() {
-                let Job { id, path, target, max_side } = job;
-                // 1) lecture + décodage (réutilise ton pipeline existant)
-                let res = (|| -> Result<(Vec<u8>, [usize; 2]), String> {
-                    // on garde ton load_any_rgba8 + resize “intelligent”
-                    let (mut data, dims) = load_any_rgba8(&path)?;
-                    let (w, h) = (dims[0] as u32, dims[1] as u32);
-                    let max0 = w.max(h);
-                    if max0 > max_side {
-                        // petit resize pour limiter le coût GPU
-                        let img = image::RgbaImage::from_raw(w, h, std::mem::take(&mut data))
-                            .ok_or_else(|| "buffer RGBA invalide".to_string())?;
-                        let scale = max_side as f32 / max0 as f32;
-                        let nw = (w as f32 * scale).round() as u32;
-                        let nh = (h as f32 * scale).round() as u32;
-                        let resized = image::DynamicImage::ImageRgba8(img)
-                            .resize_exact(nw, nh, image::imageops::FilterType::Triangle)
-                            .to_rgba8();
-                        let (nw, nh) = resized.dimensions();
-                        Ok((resized.into_raw(), [nw as usize, nh as usize]))
-                    } else {
-                        Ok((data, [w as usize, h as usize]))
-                    }
-                })();
 
-                match res {
-                    Ok((rgba, size)) => {
-                        let _ = tx_res.send(JobResult::Ok {
-                            id, target, size, rgba: Arc::new(rgba)
-                        });
+    let shared_rx = Arc::new(Mutex::new(rx_job));
+    let n = num_threads.max(1);
+
+    let mut workers = Vec::with_capacity(n);
+    for _ in 0..n {
+        let rx = Arc::clone(&shared_rx);
+        let tx_res_cl = tx_res.clone();
+        workers.push(thread::spawn(move || {
+            loop {
+                let job = {
+                    let lock = rx.lock().unwrap();
+                    // Si le sender est fermé => break
+                    match lock.recv() {
+                        Ok(j) => j,
+                        Err(_) => break,
                     }
-                    Err(e) => {
-                        let _ = tx_res.send(JobResult::Err { id, target, error: e });
+                };
+                match job {
+                    Job::Load { id, path, target, max_side } => {
+                        let res = (|| -> Result<(Vec<u8>, [usize;2]), String> {
+                            let (mut data, dims) = load_any_rgba8(&path)?;
+                            let (w, h) = (dims[0] as u32, dims[1] as u32);
+                            let max0 = w.max(h);
+                            if max0 > max_side {
+                                let img = image::RgbaImage::from_raw(w, h, std::mem::take(&mut data))
+                                    .ok_or_else(|| "buffer RGBA invalide".to_string())?;
+                                let scale = max_side as f32 / max0 as f32;
+                                let nw = ((w as f32 * scale).round() as u32).max(1);
+                                let nh = ((h as f32 * scale).round() as u32).max(1);
+                                let resized = image::DynamicImage::ImageRgba8(img)
+                                    .resize_exact(nw, nh, image::imageops::FilterType::Triangle)
+                                    .to_rgba8();
+                                let (nw, nh) = resized.dimensions();
+                                Ok((resized.into_raw(), [nw as usize, nh as usize]))
+                            } else {
+                                Ok((data, [w as usize, h as usize]))
+                            }
+                        })();
+
+                        match res {
+                            Ok((rgba, size)) => {
+                                let _ = tx_res_cl.send(JobResult::Ok {
+                                    id, target, size, rgba: Arc::new(rgba)
+                                });
+                            }
+                            Err(e) => {
+                                let _ = tx_res_cl.send(JobResult::Err { id, target, error: e });
+                            }
+                        }
                     }
+                    Job::Quit => break,
                 }
             }
-        });
-    
+        }));
+    }
 
-    Loader { tx: tx_job, rx: rx_res }
+    Loader { tx: tx_job, rx: rx_res, workers }
 }
-
 
 //==============================================
 
@@ -172,7 +200,6 @@ fn scissor_from_info(info: &egui::PaintCallbackInfo) -> Option<(u32, u32, u32, u
     Some((ix1 as u32, iy1 as u32, iw as u32, ih as u32))
 }
 
-
 // ---- Budgets mémoire / tailles maxi ----
 const MAX_SIDE: u32 = 20_000;                 // côté max accepté
 const MAX_PIXELS_SOFT: u64 = 120_000_000;     // ~120 MP → on downscale
@@ -213,7 +240,6 @@ fn resize_rgba8_buf(rgba: Vec<u8>, w: u32, h: u32, tw: u32, th: u32) -> Result<V
         .resize_exact(tw, th, image::imageops::FilterType::Lanczos3);
     Ok(dynimg.to_rgba8().into_raw())
 }
-
 
 // ======================= Conversions =======================
 
@@ -277,6 +303,7 @@ fn rgba_from_gray_f32(gray: &[f32], w: usize, h: usize) -> Vec<u8> {
     }
     out
 }
+
 fn rgba_from_rgb_u8(rgb: &[u8], w: usize, h: usize) -> Vec<u8> {
     let mut out = vec![0u8; w * h * 4];
     for i in 0..(w * h) {
@@ -287,6 +314,7 @@ fn rgba_from_rgb_u8(rgb: &[u8], w: usize, h: usize) -> Vec<u8> {
     }
     out
 }
+
 fn rgba_from_rgb_u16(rgb: &[u16], w: usize, h: usize) -> Vec<u8> {
     let mut out = vec![0u8; w * h * 4];
     for i in 0..(w * h) {
@@ -297,6 +325,7 @@ fn rgba_from_rgb_u16(rgb: &[u16], w: usize, h: usize) -> Vec<u8> {
     }
     out
 }
+
 fn rgba_from_rgb_f32(rgb: &[f32], w: usize, h: usize) -> Vec<u8> {
     let (mn, mx) = normalize_min_max_f32(rgb);
     let denom = (mx - mn).abs();
@@ -378,7 +407,6 @@ fn parse_val_num(s: &str) -> Option<f64> {
         .replace('d', "E");
     t.parse::<f64>().ok()
 }
-
 
 //====================================== EXIF =========================================
 
@@ -537,8 +565,6 @@ fn extract_exif(path: &std::path::Path) -> Result<Vec<(String, String)>, String>
 
     Ok(out)
 }
-
-
 
 fn start_meta_loader() -> MetaLoader {
     let (tx_job, rx_job) = channel::<MetaJob>();
@@ -790,9 +816,6 @@ fn ui_props_exif(
     }
 }
 
-
-
-
 // ======================= Dispatcher formats =======================
 
 fn supported_ext(ext: &str) -> bool {
@@ -834,6 +857,32 @@ struct HistOut {
     r: [u32; 256],
     g: [u32; 256],
     b: [u32; 256],
+}
+
+#[inline]
+fn compute_hist_or_zero(
+    rgba_opt: Option<&Arc<Vec<u8>>>,
+    size: [usize; 2],
+    brightness: f32,
+    contrast: f32,
+    saturation: f32,
+    gamma: f32,
+    sample_target: usize,
+) -> ([u32;256],[u32;256],[u32;256],[u32;256]) {
+    if let Some(buf) = rgba_opt {
+        let out = compute_hist_rgba(
+            buf,
+            size,
+            brightness,
+            contrast,
+            saturation,
+            gamma,
+            sample_target,
+        );
+        (out.luma, out.r, out.g, out.b)
+    } else {
+        ([0;256],[0;256],[0;256],[0;256])
+    }
 }
 
 fn compute_hist_rgba(
@@ -906,7 +955,6 @@ fn compute_hist_rgba(
 
     out
 }
-
 
 fn draw_histogram_luma(ui: &mut egui::Ui, hist: &[u32; 256], height: f32, log_scale: bool) {
     let width = 256.0;
@@ -1270,7 +1318,6 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     diff = clamp01(diff * vec3<f32>(1.0));
     let out_rgb = apply_bcs_gamma(diff);
     return vec4<f32>(out_rgb, 1.0);
-
 }
 "#;
 
@@ -1747,7 +1794,20 @@ fn make_postprocess_paint_callback_diff(
 enum CompareMode {
     Split,
     Blink,
-    Diff,
+    Diff,  
+}
+
+impl CompareMode {
+    #[inline]
+    fn label(self) -> &'static str {
+        match self {
+            CompareMode::Split => "Side/Side",
+            CompareMode::Blink => "Blink",
+            CompareMode::Diff  => "Diff",
+            // CompareMode::Overlay => "Overlay",      
+            // CompareMode::Swipe   => "Swipe",        
+        }
+    }
 }
 
 // ======================= App =======================
@@ -2619,12 +2679,13 @@ impl App {
     fn request_image_a(&mut self, path: PathBuf, max_side: u32) {
         let id = ReqId(self.next_req_id); self.next_req_id += 1;
         self.last_req_a = Some(id);
-        self.inflight_a = true; 
+        self.inflight_a = true;
         self.orig_a = None;
         if let Some(old) = self.tex_a_cpu.take() {
             self.pending_free.push(old);
         }
-        let _ = self.loader.tx.send(Job {
+        let max_side = max_side.min(MAX_SIDE);  // MAX_SIDE = 20_000 
+        let _ = self.loader.tx.send(Job::Load {
             id, path, target: Target::MainPaneA, max_side
         });
     }
@@ -2632,12 +2693,13 @@ impl App {
     fn request_image_b(&mut self, path: PathBuf, max_side: u32) {
         let id = ReqId(self.next_req_id); self.next_req_id += 1;
         self.last_req_b = Some(id);
-        self.inflight_b = true; 
+        self.inflight_b = true;
         self.orig_b = None;
         if let Some(old) = self.tex_b_cpu.take() {
             self.pending_free.push(old);
         }
-        let _ = self.loader.tx.send(Job {
+        let max_side = max_side.min(MAX_SIDE);  // MAX_SIDE = 20_000 
+        let _ = self.loader.tx.send(Job::Load {
             id, path, target: Target::MainPaneB, max_side
         });
     }
@@ -2895,258 +2957,274 @@ impl eframe::App for App {
         }
 
         // Barre du haut — actions
-        egui::TopBottomPanel::top("menu").min_height(23.0).show(ctx, |ui| {
+        egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Open A").clicked()
-                    || ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::O))
-                {
-                    if let Some(path) = FileDialog::new()
-                        .add_filter(
-                            "Images",
-                            &[
-                                "png", "jpg", "jpeg", "bmp", "tiff", "tif", "webp", "gif", "tga",
-                                "ico", "pnm", "hdr"
-                            ],
-                        )
-                        .pick_file()
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.set_min_height(26.0);
+                    if ui.button("Open A").clicked()
+                        || ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::O))
                     {
-                        let _ = self.load_image_a(ctx, path);
+                        if let Some(path) = FileDialog::new()
+                            .add_filter(
+                                "Images",
+                                &[
+                                    "png", "jpg", "jpeg", "bmp", "tiff", "tif", "webp", "gif", "tga",
+                                    "ico", "pnm", "hdr"
+                                ],
+                            )
+                            .pick_file()
+                        {
+                            let _ = self.load_image_a(ctx, path);
+                        }
+                    }
+                    
+                if self.orig_a.is_some(){
+                    if ui.button("Open B").clicked() {
+                        if let Some(path) = FileDialog::new()
+                            .add_filter(
+                                "Images",
+                                &[
+                                    "png", "jpg", "jpeg", "bmp", "tiff", "tif", "webp", "gif", "tga",
+                                    "ico", "pnm", "hdr"
+                                ],
+                            )
+                            .pick_file()
+                        {
+                            let _ = self.load_image_b(ctx, path);
+                            self.compare_enabled = true;
+                            self.request_fit = true;
+                            self.compare_center_uv = [0.5, 0.5];
+                        }
                     }
                 }
+
+                //bouton close B
+                if self.compare_enabled{
+                    if ui.add(
+                    egui::Button::new(
+                        RichText::new("X").color(egui::Color32::from_rgb(255, 255, 255)))
+                            .fill(egui::Color32::from_rgb(231, 52, 21))
+                        ).clicked() {
+                        self.close_b(ctx);
+                    }
+                }
+
+                ui.separator();
+                let disable_a = self.filelist_a.len() <= 1;
+                let disable_b = self.filelist_b.len() <= 1;
+
                 
-            if self.orig_a.is_some(){
-                if ui.button("Open B").clicked() {
-                    if let Some(path) = FileDialog::new()
-                        .add_filter(
-                            "Images",
-                            &[
-                                "png", "jpg", "jpeg", "bmp", "tiff", "tif", "webp", "gif", "tga",
-                                "ico", "pnm", "hdr"
-                            ],
-                        )
-                        .pick_file()
-                    {
-                        let _ = self.load_image_b(ctx, path);
-                        self.compare_enabled = true;
-                        self.request_fit = true;
-                        self.compare_center_uv = [0.5, 0.5];
-                    }
-                }
-            }
-
-            //bouton close B
-            if self.compare_enabled{
-                if ui.add(
-                egui::Button::new(
-                    RichText::new("X").color(egui::Color32::from_rgb(255, 255, 255)))
-                        .fill(egui::Color32::from_rgb(231, 52, 21))
-                    ).clicked() {
-                    self.close_b(ctx);
-                }
-            }
-
-            ui.separator();
-            let disable_a = self.filelist_a.len() <= 1;
-            let disable_b = self.filelist_b.len() <= 1;
-
-            
-            // Navigation dossier A
-            if ui
-                .add_enabled(!disable_a, egui::Button::new("A ◀ Prev."))
-                .clicked()
-            {
-                let _ = self.navigate_a(ctx, -1);
-            }
-            if ui
-                .add_enabled(!disable_a, egui::Button::new("A Next ▶"))
-                .clicked()
-            {
-                let _ = self.navigate_a(ctx, 1);
-            }
-        
-
-            // ---- Navigation pour B (si compare_enabled ) ----
-            if self.compare_enabled {
-                // Navigation dossier B (comme avant)
+                // Navigation dossier A
                 if ui
-                    .add_enabled(!disable_b, egui::Button::new("B ◀ Prev."))
+                    .add_enabled(!disable_a, egui::Button::new("A ◀ Prev."))
                     .clicked()
                 {
-                    let _ = self.navigate_b(ctx, -1);
+                    let _ = self.navigate_a(ctx, -1);
                 }
                 if ui
-                    .add_enabled(!disable_b, egui::Button::new("B Next ▶"))
+                    .add_enabled(!disable_a, egui::Button::new("A Next ▶"))
                     .clicked()
                 {
-                    let _ = self.navigate_b(ctx, 1);
+                    let _ = self.navigate_a(ctx, 1);
                 }
-            }
             
 
-            //Bouton Diaporama et options connexes
-            if !self.compare_enabled && self.orig_a.is_some() {
-                ui.separator();
-                if ui.button("🎞 Slideshow").clicked() {
-                    self.slideshow_mode = true;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
-                }
-
-                if ui.checkbox(&mut self.auto_slideshow, "Auto").changed() {
-                    if self.auto_slideshow {
-                        self.slideshow_timer = self.slideshow_interval;
+                // ---- Navigation pour B (si compare_enabled ) ----
+                if self.compare_enabled {
+                    // Navigation dossier B (comme avant)
+                    if ui
+                        .add_enabled(!disable_b, egui::Button::new("B ◀ Prev."))
+                        .clicked()
+                    {
+                        let _ = self.navigate_b(ctx, -1);
                     }
-                 }
-
-                ui.add(
-                egui::Slider::new(&mut self.slideshow_interval, 1.0..=30.0)
-                    .text("sec.")
-                );
+                    if ui
+                        .add_enabled(!disable_b, egui::Button::new("B Next ▶"))
+                        .clicked()
+                    {
+                        let _ = self.navigate_b(ctx, 1);
+                    }
+                }
                 
-                ui.add(
-                    egui::Slider::new(&mut self.slideshow_fade_duration, 0.0..=5.0)
-                        .text("Fade")
-                );
-            }
-    
-            // toggle diaporama avec F11
-            if ctx.input(|i| i.key_pressed(egui::Key::F11)) {
-                self.slideshow_mode = !self.slideshow_mode;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.slideshow_mode));
-            }
 
-            ui.separator();
-
-            // --- mémorise l'état avant interaction ---
-            let was_compare_enabled = self.compare_enabled;
-            let was_mode = self.compare_mode;
-            let was_link = self.link_views;
-            
-            if self.compare_enabled && self.orig_a.is_some() && self.orig_b.is_some() {
-
-                
-                ui.label("Mode :");
-    
-                    ui.selectable_value(&mut self.compare_mode, CompareMode::Split, "Split");
-                    ui.selectable_value(&mut self.compare_mode, CompareMode::Blink, "Blink");
-                    ui.selectable_value(&mut self.compare_mode, CompareMode::Diff,  "Diff");
-               
-                ui.separator();
-
-                if self.compare_mode==CompareMode::Split { 
-                    ui.checkbox(&mut self.show_split_divider, "Div.");
-                    ui.checkbox(&mut self.link_views, "Link");
+                //Bouton Diaporama et options connexes
+                if !self.compare_enabled && self.orig_a.is_some() {
                     ui.separator();
-                }
-
-                // si changement d'état Link → initialise proprement les paramètres
-                if self.link_views != was_link {
-                    if self.link_views {
-                        // On repasse en mode lié : unifie le zoom sur la base des deux
-                        let avg = 0.5 * (self.zoom_a + self.zoom_b);
-                        self.zoom = avg.clamp(self.min_zoom, self.max_zoom);
-                        self.offset = Vec2::ZERO;
-                        self.compare_center_uv = [0.5, 0.5];
-                        self.request_center = true;
-                    } else {
-                        // On passe en mode indépendant : duplique les valeurs actuelles
-                        self.zoom_a = self.zoom.clamp(self.min_zoom, self.max_zoom);
-                        self.zoom_b = self.zoom_a;
-                        self.offset_a = Vec2::ZERO;
-                        self.offset_b = Vec2::ZERO;
-                        self.request_center = true;
+                    if ui.button("🎞 Slideshow").clicked() {
+                        self.slideshow_mode = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
                     }
+
+                    if ui.checkbox(&mut self.auto_slideshow, "Auto").changed() {
+                        if self.auto_slideshow {
+                            self.slideshow_timer = self.slideshow_interval;
+                        }
+                    }
+
+                    ui.add(
+                    egui::Slider::new(&mut self.slideshow_interval, 1.0..=30.0)
+                        .text("sec.")
+                    );
+                    
+                    ui.add(
+                        egui::Slider::new(&mut self.slideshow_fade_duration, 0.0..=5.0)
+                            .text("Fade")
+                    );
+                }
+        
+                // toggle diaporama avec F11
+                if ctx.input(|i| i.key_pressed(egui::Key::F11)) {
+                    self.slideshow_mode = !self.slideshow_mode;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.slideshow_mode));
                 }
 
-                match self.compare_mode {
-                    CompareMode::Split => {
+                ui.separator();
+
+                // --- mémorise l'état avant interaction ---
+                let was_compare_enabled = self.compare_enabled;
+                let was_mode = self.compare_mode;
+                let was_link = self.link_views;
+                
+                if self.compare_enabled && self.orig_a.is_some() && self.orig_b.is_some() {
+
+                    
+                ui.horizontal(|ui| {
+                        // Combo compact sans label pour gagner de la place :
+                        egui::ComboBox::from_id_salt("cmp_mode")
+                            .selected_text(self.compare_mode.label())
+                            .show_ui(ui, |ui| {
+                                let style = ui.style_mut();
+                                style.spacing.item_spacing.x = 4.0;
+                                style.spacing.item_spacing.y = 4.0;
+                                ui.selectable_value(&mut self.compare_mode, CompareMode::Split, "Side/Side");
+                                ui.selectable_value(&mut self.compare_mode, CompareMode::Blink, "Blink");
+                                ui.selectable_value(&mut self.compare_mode, CompareMode::Diff,  "Diff");
+                                // ui.selectable_value(&mut self.compare_mode, CompareMode::Overlay, "Overlay");
+                                // ui.selectable_value(&mut self.compare_mode, CompareMode::Swipe,   "Swipe");
+                            });
+
+                        // (Option) petit bouton aide/tooltip :
+                        // ui.small_button("ⓘ").on_hover_text(self.compare_mode.help());
+                    });
+                
+                    ui.separator();
+
+                    if self.compare_mode==CompareMode::Split { 
+                        ui.checkbox(&mut self.show_split_divider, "Div.");
+                        ui.checkbox(&mut self.link_views, "Link");
+                        ui.separator();
+                    }
+
+                    // si changement d'état Link → initialise proprement les paramètres
+                    if self.link_views != was_link {
                         if self.link_views {
-                            //ui.add(egui::Slider::new(&mut self.compare_split, 0.0..=1.0).text("Split (A ⇠ B)"));
-                            ui.add(egui::Slider::new(&mut self.compare_spacing, -1.0..=1.0).step_by(0.001).drag_value_speed(0.001).text("Horz."));
-                            ui.add(egui::Slider::new(&mut self.compare_vertical_offset, -1.0..=1.0).step_by(0.001).drag_value_speed(0.001).text("Vert."));
-                            if ui.button("Reset").clicked() {
-                                self.compare_spacing = 0.000;
-                                self.compare_vertical_offset = 0.000;
-                            } 
-                        }            
-                    }
-                    CompareMode::Blink => {
-                        ui.add(egui::Slider::new(&mut self.blink_hz, 0.5..=8.0).text("Hz").logarithmic(true));
-                        // --- PATCH: si on vient d'activer Blink, centre l'image ---
-                        let blink_just_enabled =
-                            self.compare_enabled
-                            && (!was_compare_enabled || was_mode != self.compare_mode)
-                            && matches!(self.compare_mode, CompareMode::Blink);
-
-                        if blink_just_enabled {
-                            // centre au prochain frame (utilise ta logique existante dans le CentralPanel)
+                            // On repasse en mode lié : unifie le zoom sur la base des deux
+                            let avg = 0.5 * (self.zoom_a + self.zoom_b);
+                            self.zoom = avg.clamp(self.min_zoom, self.max_zoom);
+                            self.offset = Vec2::ZERO;
                             self.compare_center_uv = [0.5, 0.5];
                             self.request_center = true;
-                            ui.ctx().request_repaint();
-                        }
-                    }
-                    CompareMode::Diff => {
-                        let diff_just_enabled =
-                            self.compare_enabled
-                            && (!was_compare_enabled || was_mode != self.compare_mode)
-                            && matches!(self.compare_mode, CompareMode::Diff);
-
-                        if diff_just_enabled {
-                            // centre au prochain frame (utilise ta logique existante dans le CentralPanel)
-                            self.compare_center_uv = [0.5, 0.5];
+                        } else {
+                            // On passe en mode indépendant : duplique les valeurs actuelles
+                            self.zoom_a = self.zoom.clamp(self.min_zoom, self.max_zoom);
+                            self.zoom_b = self.zoom_a;
+                            self.offset_a = Vec2::ZERO;
+                            self.offset_b = Vec2::ZERO;
                             self.request_center = true;
-                            ui.ctx().request_repaint();
                         }
                     }
-                }
-            }
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // -- Bouton Options
-                    if ui.add(
-                egui::Button::new(
-                    RichText::new("⚙").color(egui::Color32::from_rgb(255, 255, 255)))
-                        .fill(egui::Color32::from_rgb(243, 172, 17))
-                    ).clicked() {
-                        self.show_options = !self.show_options;
-                    }
-                // -- Bouton About
-                    if ui.add(
-                egui::Button::new(
-                    RichText::new("ℹ").color(egui::Color32::from_rgb(255, 255, 255)))
-                        .fill(egui::Color32::from_rgb(231, 52, 21))
-                    ).clicked() {
-                        self.show_props = true;
-
-                        if let Some(p) = &self.path_a {
-                            self.props_a = build_properties_for(self.size_a, p);
-                            let _ = self.meta_loader.tx.send(MetaJob { pane: Pane::A, path: p.clone() });
-                            self.meta_inflight_a = true;
+                    match self.compare_mode {
+                        CompareMode::Split => {
+                            if self.link_views {
+                                //ui.add(egui::Slider::new(&mut self.compare_split, 0.0..=1.0).text("Split (A ⇠ B)"));
+                                ui.add(egui::Slider::new(&mut self.compare_spacing, -1.0..=1.0).step_by(0.001).drag_value_speed(0.001).text("Horz."));
+                                ui.add(egui::Slider::new(&mut self.compare_vertical_offset, -1.0..=1.0).step_by(0.001).drag_value_speed(0.001).text("Vert."));
+                                if ui.button("Reset").clicked() {
+                                    self.compare_spacing = 0.000;
+                                    self.compare_vertical_offset = 0.000;
+                                } 
+                            }            
                         }
-                        if self.compare_enabled {
-                            if let Some(p) = &self.path_b {
-                                self.props_b = build_properties_for(self.size_b, p);
-                                let _ = self.meta_loader.tx.send(MetaJob { pane: Pane::B, path: p.clone() });
-                                self.meta_inflight_b = true;
+                        CompareMode::Blink => {
+                            ui.add(egui::Slider::new(&mut self.blink_hz, 0.5..=8.0).text("Hz").logarithmic(true));
+                            // --- PATCH: si on vient d'activer Blink, centre l'image ---
+                            let blink_just_enabled =
+                                self.compare_enabled
+                                && (!was_compare_enabled || was_mode != self.compare_mode)
+                                && matches!(self.compare_mode, CompareMode::Blink);
+
+                            if blink_just_enabled {
+                                // centre au prochain frame (utilise ta logique existante dans le CentralPanel)
+                                self.compare_center_uv = [0.5, 0.5];
+                                self.request_center = true;
+                                ui.ctx().request_repaint();
+                            }
+                        }
+                        CompareMode::Diff => {
+                            let diff_just_enabled =
+                                self.compare_enabled
+                                && (!was_compare_enabled || was_mode != self.compare_mode)
+                                && matches!(self.compare_mode, CompareMode::Diff);
+
+                            if diff_just_enabled {
+                                // centre au prochain frame (utilise ta logique existante dans le CentralPanel)
+                                self.compare_center_uv = [0.5, 0.5];
+                                self.request_center = true;
+                                ui.ctx().request_repaint();
                             }
                         }
                     }
+                }
 
-                // Boutons FIT 11 center     
-                ui.separator();
-                ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // -- Bouton Options
+                        if ui.add(
+                    egui::Button::new(
+                        RichText::new("⚙").color(egui::Color32::from_rgb(255, 255, 255)))
+                            .fill(egui::Color32::from_rgb(243, 172, 17))
+                        ).clicked() {
+                            self.show_options = !self.show_options;
+                        }
+                    // -- Bouton About
+                        if ui.add(
+                    egui::Button::new(
+                        RichText::new("ℹ").color(egui::Color32::from_rgb(255, 255, 255)))
+                            .fill(egui::Color32::from_rgb(231, 52, 21))
+                        ).clicked() {
+                            self.show_props = true;
 
-                    if ui.button("[+]").clicked() {
-                        self.cmd_center();
-                    }
-                    if ui.button("1:1").clicked() {
-                        self.cmd_one_to_one();
-                    }
-                    if ui.button("Fit").clicked() {
-                        self.fit_allow_upscale = true;
-                        self.cmd_fit();
-                    }
+                            if let Some(p) = &self.path_a {
+                                self.props_a = build_properties_for(self.size_a, p);
+                                let _ = self.meta_loader.tx.send(MetaJob { pane: Pane::A, path: p.clone() });
+                                self.meta_inflight_a = true;
+                            }
+                            if self.compare_enabled {
+                                if let Some(p) = &self.path_b {
+                                    self.props_b = build_properties_for(self.size_b, p);
+                                    let _ = self.meta_loader.tx.send(MetaJob { pane: Pane::B, path: p.clone() });
+                                    self.meta_inflight_b = true;
+                                }
+                            }
+                        }
+
+                    // Boutons FIT 11 center     
+                    ui.separator();
+                    ui.horizontal(|ui| {
+
+                        if ui.button("[+]").clicked() {
+                            self.cmd_center();
+                        }
+                        if ui.button("1:1").clicked() {
+                            self.cmd_one_to_one();
+                        }
+                        if ui.button("Fit").clicked() {
+                            self.fit_allow_upscale = true;
+                            self.cmd_fit();
+                        }
+                    });
                 });
-            });
+                });
             });          
         });
 
@@ -4124,49 +4202,21 @@ impl eframe::App for App {
 
        // Histogrammes (A et B)
         if self.hist_dirty {
-            // --- A ---
-            if let Some(orig) = &self.orig_a {
-                let out = compute_hist_rgba(
-                    orig,
-                    self.size_a,
-                    self.brightness,
-                    self.contrast,
-                    self.saturation,
-                    self.gamma,
-                    1_000_000,
-                );
-                self.hist_luma = out.luma;
-                self.hist_r = out.r;
-                self.hist_g = out.g;
-                self.hist_b = out.b;
-            } else {
-                self.hist_luma = [0; 256];
-                self.hist_r = [0; 256];
-                self.hist_g = [0; 256];
-                self.hist_b = [0; 256];
-            }
+            let (l, r, g, b) = compute_hist_or_zero(
+                self.orig_a.as_ref(),
+                self.size_a,
+                self.brightness, self.contrast, self.saturation, self.gamma,
+                1_000_000,
+            );
+            self.hist_luma = l; self.hist_r = r; self.hist_g = g; self.hist_b = b;
 
-            // --- B ---
-            if let Some(orig_b) = &self.orig_b {
-                let out_b = compute_hist_rgba(
-                    orig_b,
-                    self.size_b,
-                    self.brightness,
-                    self.contrast,
-                    self.saturation,
-                    self.gamma,
-                    1_000_000,
-                );
-                self.hist2_luma = out_b.luma;
-                self.hist2_r = out_b.r;
-                self.hist2_g = out_b.g;
-                self.hist2_b = out_b.b;
-            } else {
-                self.hist2_luma = [0; 256];
-                self.hist2_r = [0; 256];
-                self.hist2_g = [0; 256];
-                self.hist2_b = [0; 256];
-            }
+            let (l2, r2, g2, b2) = compute_hist_or_zero(
+                self.orig_b.as_ref(),
+                self.size_b,
+                self.brightness, self.contrast, self.saturation, self.gamma,
+                1_000_000,
+            );
+            self.hist2_luma = l2; self.hist2_r = r2; self.hist2_g = g2; self.hist2_b = b2;
 
             self.hist_dirty = false;
         }
