@@ -4099,7 +4099,7 @@ impl eframe::App for App {
                         }
                     }
 
-                    // Blink et Diff: fit comme en mode normal, sur tout le panel
+                    // Blink, Diff, Overlay : fit comme en mode normal, sur tout le panel
                     _ => {
                         let ref_tex = if self.size_a != [0, 0] { self.size_a } else { self.size_b };
                         if self.request_fit && ref_tex != [0, 0] {
