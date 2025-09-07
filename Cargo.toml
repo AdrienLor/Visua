@@ -5,7 +5,7 @@ winres = "0.1"
 [package]
 build = "build.rs"
 name = "visua"
-version = "1.4.2"
+version = "1.5.0"
 authors = ["AdrienLor"]
 edition = "2024"
 
@@ -27,5 +27,6 @@ name = "Visua"
 icon = ["assets/icon.icns"]         # optionnel si tu as une icône
 copyright = "© 2025 Adrien Lorette"
 short_description = "Fast, clear image viewer"
+
 
 category = "public.app-category.photography"
