@@ -31,13 +31,6 @@
 
 ---
 
-## HotFix (v1.4.1)
-
-- Correct centering of images in **linked comparison mode** during rotation.  
-- Fade-in effect now works consistently across modes (slideshow and normal view).  
-- Rotation and mirroring logic cleaned up, with reset option available.  
-- Removed unused `build_params_compare` path (simplified GPU pipeline).  
-
 ## What’s new (v1.5.0)
 
 - **New comparison modes**:  
