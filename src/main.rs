@@ -4102,7 +4102,7 @@ impl eframe::App for App {
                     }
                 }
 
-                ui.separator();
+                
                 let disable_a = self.filelist_a.len() <= 1;
                 let disable_b = self.filelist_b.len() <= 1;
 
@@ -4200,13 +4200,10 @@ impl eframe::App for App {
                         // (Option) petit bouton aide/tooltip :
                         // ui.small_button("ⓘ").on_hover_text(self.compare_mode.help());
                     });
-                
-                    ui.separator();
 
                     if self.compare_mode==CompareMode::Split { 
                         ui.checkbox(&mut self.show_split_divider, "Div.");
                         ui.checkbox(&mut self.link_views, "Link");
-                        ui.separator();
                     }
 
                     // si changement d'état Link → initialise proprement les paramètres
@@ -4294,7 +4291,7 @@ impl eframe::App for App {
                             .text("Opacity B"));
                         }
                         CompareMode::Checkerboard => {
-                            ui.add(egui::Slider::new(&mut self.checker_tile_px, 4.0..=1024.0).text("Tile size)"));
+                            ui.add(egui::Slider::new(&mut self.checker_tile_px, 4.0..=1024.0).text("Tile size"));
                         }
                     }
                 }
