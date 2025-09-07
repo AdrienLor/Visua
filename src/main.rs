@@ -4306,15 +4306,19 @@ impl eframe::App for App {
                         RichText::new("⚙").color(egui::Color32::from_rgb(255, 255, 255)))
                             .fill(egui::Color32::from_rgb(243, 172, 17))
                         ).clicked() {
-                            self.show_options = !self.show_options;
+                            if self.orig_a.is_some() {
+                                self.show_options = !self.show_options;
+                            }   
                         }
-                    // -- Bouton About
+                    // -- Bouton infos
                         if ui.add(
                     egui::Button::new(
                         RichText::new("ℹ").color(egui::Color32::from_rgb(255, 255, 255)))
                             .fill(egui::Color32::from_rgb(231, 52, 21))
                         ).clicked() {
-                            self.show_props = true;
+                            if self.orig_a.is_some() {
+                                self.show_props = true;
+                            }
 
                             if let Some(p) = &self.path_a {
                                 self.props_a = build_properties_for(self.size_a, p);
