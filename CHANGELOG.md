@@ -18,6 +18,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - …
 
+## v1.5.0 (2025-09-07)
+
+### New
+- **Checkerboard comparison mode**  
+  - Displays A and B in a tiled checkerboard pattern.  
+  - Adjustable tile size (4–128 px).  
+- **Extended Diff modes**  
+  - **Gray**: continuous difference map, or binary (thresholded).  
+  - **Color**: per-channel absolute differences (R/G/B visible independently).  
+  - **Heatmap**: false-color difference map with adjustable gain.  
+- **UI improvements**  
+  - Exclusive selector for Diff visualization modes (Gray / Color / Heatmap).  
+  - Contextual controls (threshold slider, gain slider) only shown when relevant.  
+
+### Fixes & Improvements
+- Unified handling of Diff parameters (`overlay_alpha` reused safely across modes).  
+- Better alignment of comparison modes (Overlay, Diff, Checkerboard) with consistent centering and zoom handling.  
+- Code cleanup: reduced duplication between callbacks, shaders now share consistent parameter struct.  
+
 ---
 
 ## [1.4.1] – 2025-09-06
