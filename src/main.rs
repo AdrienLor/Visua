@@ -1200,151 +1200,6 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 }
 "#;
 
-const POST_WGSL_DIFF: &str = r#"
-struct Params {
-    brightness: f32,
-    contrast:   f32,
-    saturation: f32,
-    gamma:      f32,
-    flip_h:     u32,
-    flip_v:     u32,
-    rotation:   u32,
-    _pad0:      u32,
-    zoom:       f32,
-    _pad1:      f32,
-    tex_w:      f32,
-    tex_h:      f32,
-    off_x:      f32,
-    off_y:      f32,
-    center_u:   f32,
-    center_v:   f32,
-    rect_min_x: f32, rect_min_y: f32,
-    rect_max_x: f32, rect_max_y: f32,
-    overlay_alpha: f32,
-    ppp:        f32,
-    fade_alpha: f32,
-    _pad2:      vec3<f32>,
-};
-
-@group(0) @binding(0) var samp: sampler;
-@group(0) @binding(1) var texA: texture_2d<f32>;
-@group(0) @binding(2) var texB: texture_2d<f32>;
-@group(0) @binding(3) var<uniform> P: Params;
-
-struct VSOut { @builtin(position) pos: vec4<f32>, };
-
-@vertex
-fn vs_main(@builtin(vertex_index) vid: u32) -> VSOut {
-    // Fullscreen triangle
-    var positions = array<vec2<f32>, 3>(
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>( 3.0, -1.0),
-        vec2<f32>(-1.0,  3.0),
-    );
-    var o: VSOut;
-    o.pos = vec4<f32>(positions[vid], 0.0, 1.0);
-    return o;
-}
-
-fn clamp01(v: vec3<f32>) -> vec3<f32> { return clamp(v, vec3<f32>(0.0), vec3<f32>(1.0)); }
-fn apply_bcs_gamma(rgb: vec3<f32>) -> vec3<f32> {
-    var c = rgb + vec3<f32>(P.brightness);
-    c = (c - vec3<f32>(0.5)) * vec3<f32>(P.contrast) + vec3<f32>(0.5);
-    let l = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
-    c = mix(vec3<f32>(l), c, vec3<f32>(P.saturation));
-    c = clamp01(c);
-    c = pow(c, vec3<f32>(max(P.gamma, 1e-6)));
-    return clamp01(c);
-}
-
-@fragment
-fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let fx = frag_pos.x / P.ppp;
-    let fy = frag_pos.y / P.ppp;
-
-    let rx = fx - P.rect_min_x;
-    let ry = fy - P.rect_min_y;
-    let rw = max(P.rect_max_x - P.rect_min_x, 1e-6);
-    let rh = max(P.rect_max_y - P.rect_min_y, 1e-6);
-
-    var tw: f32;
-    var th: f32;
-    if (P.rotation == 90u || P.rotation == 270u) {
-        tw = max(P.tex_h * P.zoom, 1e-6);
-        th = max(P.tex_w * P.zoom, 1e-6);
-    } else {
-        tw = max(P.tex_w * P.zoom, 1e-6);
-        th = max(P.tex_h * P.zoom, 1e-6);
-    }
-
-    var u: f32;
-    var v: f32;
-
-    if (P.center_u >= 0.0) {
-        let cx = rw * 0.5 + P.off_x;
-        let cy = rh * 0.5 + P.off_y;
-        let tlx = cx - P.center_u * tw;
-        let tly = cy - P.center_v * th;
-        u = (rx - tlx) / tw;
-        v = (ry - tly) / th;
-    } else {
-        u = (rx - P.off_x) / tw;
-        v = (ry - P.off_y) / th;
-    }
-
-    if (P.flip_h == 1u) { u = 1.0 - u; }
-    if (P.flip_v == 1u) { v = 1.0 - v; }
-
-    // rotation selon l'angle
-    if (P.rotation == 90u) {
-        let tmp = u;
-        u = v;
-        v = 1.0 - tmp;
-    } else if (P.rotation == 180u) {
-        u = 1.0 - u;
-        v = 1.0 - v;
-    } else if (P.rotation == 270u) {
-        let tmp = u;
-        u = 1.0 - v;
-        v = tmp;
-    }
-
-    // Transparence hors image pour montrer le fond
-    if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) {
-        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    }
-
-    let colA = textureSample(texA, samp, vec2<f32>(u, v)).rgb;
-    let colB = textureSample(texB, samp, vec2<f32>(u, v)).rgb;
-
-    var d = abs(colA - colB);
-
-    // magnitude luminance pondérée
-    let mag = dot(d, vec3<f32>(0.2126, 0.7152, 0.0722));
-    // alternatives : 
-    // let mag = max(max(d.r, d.g), d.b);        // max canal
-    // let mag = (d.r + d.g + d.b) / 3.0;        // moyenne
-
-    // seuil (overlay_alpha ∈ [0..1] ; 0 => pas de seuil)
-    let t = clamp(P.overlay_alpha, 0.0, 1.0);
-
-    var col: vec3<f32>;
-    if (t > 0.0) {
-        // binaire : blanc si au-dessus, noir sinon
-        let m = select(0.0, 1.0, mag > t);
-        col = vec3<f32>(m, m, m);
-    } else {
-        // rendu “continu” : mag en niveaux de gris
-        col = vec3<f32>(mag, mag, mag);
-    }
-
-    // corrections (si tu gardes apply_bcs_gamma) :
-    col = apply_bcs_gamma(col);
-
-    return vec4<f32>(col, 1.0) * P.fade_alpha;
-}
-"#;
-
 const POST_WGSL_OVERLAY: &str = r#"
 struct Params {
     brightness: f32,
@@ -1617,6 +1472,254 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 }
 "#;
 
+const POST_WGSL_DIFF: &str = r#"
+struct Params {
+    brightness: f32,
+    contrast:   f32,
+    saturation: f32,
+    gamma:      f32,
+    flip_h:     u32,
+    flip_v:     u32,
+    rotation:   u32,
+    _pad0:      u32,
+    zoom:       f32,
+    _pad1:      f32,
+    tex_w:      f32,
+    tex_h:      f32,
+    off_x:      f32,
+    off_y:      f32,
+    center_u:   f32,
+    center_v:   f32,
+    rect_min_x: f32, rect_min_y: f32,
+    rect_max_x: f32, rect_max_y: f32,
+    overlay_alpha: f32,
+    ppp:        f32,
+    fade_alpha: f32,
+    _pad2:      vec3<f32>,
+};
+
+@group(0) @binding(0) var samp: sampler;
+@group(0) @binding(1) var texA: texture_2d<f32>;
+@group(0) @binding(2) var texB: texture_2d<f32>;
+@group(0) @binding(3) var<uniform> P: Params;
+
+struct VSOut { @builtin(position) pos: vec4<f32>, };
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VSOut {
+    // Fullscreen triangle
+    var positions = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 3.0, -1.0),
+        vec2<f32>(-1.0,  3.0),
+    );
+    var o: VSOut;
+    o.pos = vec4<f32>(positions[vid], 0.0, 1.0);
+    return o;
+}
+
+fn clamp01(v: vec3<f32>) -> vec3<f32> { return clamp(v, vec3<f32>(0.0), vec3<f32>(1.0)); }
+fn apply_bcs_gamma(rgb: vec3<f32>) -> vec3<f32> {
+    var c = rgb + vec3<f32>(P.brightness);
+    c = (c - vec3<f32>(0.5)) * vec3<f32>(P.contrast) + vec3<f32>(0.5);
+    let l = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+    c = mix(vec3<f32>(l), c, vec3<f32>(P.saturation));
+    c = clamp01(c);
+    c = pow(c, vec3<f32>(max(P.gamma, 1e-6)));
+    return clamp01(c);
+}
+
+@fragment
+fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let fx = frag_pos.x / P.ppp;
+    let fy = frag_pos.y / P.ppp;
+
+    let rx = fx - P.rect_min_x;
+    let ry = fy - P.rect_min_y;
+    let rw = max(P.rect_max_x - P.rect_min_x, 1e-6);
+    let rh = max(P.rect_max_y - P.rect_min_y, 1e-6);
+
+    var tw: f32;
+    var th: f32;
+    if (P.rotation == 90u || P.rotation == 270u) {
+        tw = max(P.tex_h * P.zoom, 1e-6);
+        th = max(P.tex_w * P.zoom, 1e-6);
+    } else {
+        tw = max(P.tex_w * P.zoom, 1e-6);
+        th = max(P.tex_h * P.zoom, 1e-6);
+    }
+
+    var u: f32;
+    var v: f32;
+
+    if (P.center_u >= 0.0) {
+        let cx = rw * 0.5 + P.off_x;
+        let cy = rh * 0.5 + P.off_y;
+        let tlx = cx - P.center_u * tw;
+        let tly = cy - P.center_v * th;
+        u = (rx - tlx) / tw;
+        v = (ry - tly) / th;
+    } else {
+        u = (rx - P.off_x) / tw;
+        v = (ry - P.off_y) / th;
+    }
+
+    if (P.flip_h == 1u) { u = 1.0 - u; }
+    if (P.flip_v == 1u) { v = 1.0 - v; }
+
+    // rotation selon l'angle
+    if (P.rotation == 90u) {
+        let tmp = u;
+        u = v;
+        v = 1.0 - tmp;
+    } else if (P.rotation == 180u) {
+        u = 1.0 - u;
+        v = 1.0 - v;
+    } else if (P.rotation == 270u) {
+        let tmp = u;
+        u = 1.0 - v;
+        v = tmp;
+    }
+
+    // Transparence hors image pour montrer le fond
+    if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+
+    let a = textureSample(texA, samp, vec2<f32>(u, v)).rgb;
+    let b = textureSample(texB, samp, vec2<f32>(u, v)).rgb;
+    let d = abs(a - b);
+
+    // magnitude luminance pour la version gris
+    let mag = dot(d, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let t = P.overlay_alpha;  // < 0 => diff couleur ; =0 => gris continu ; >0 => binaire-seuilé
+
+    var col: vec3<f32>;
+    if (t < 0.0) {
+        // --- Diff COULEUR : garde l'info de canal ---
+        col = clamp(d, vec3<f32>(0.0), vec3<f32>(1.0));
+    } else if (t == 0.0) {
+        // --- Diff GRIS continu ---
+        col = vec3<f32>(mag, mag, mag);
+    } else {
+        // --- Diff BINAIRE (seuil) ---
+        let m = select(0.0, 1.0, mag > clamp(t, 0.0, 1.0));
+        col = vec3<f32>(m, m, m);
+    }
+
+    col = apply_bcs_gamma(col);
+    return vec4<f32>(col, 1.0) * P.fade_alpha;
+
+}
+"#;
+
+const POST_WGSL_DIFF_HEATMAP: &str = r#"
+struct Params {
+    brightness: f32,
+    contrast:   f32,
+    saturation: f32,
+    gamma:      f32,
+    flip_h:     u32,
+    flip_v:     u32,
+    rotation:   u32,
+    _pad0:      u32,
+    zoom:       f32,
+    _pad1:      f32,
+    tex_w:      f32,
+    tex_h:      f32,
+    off_x:      f32,
+    off_y:      f32,
+    center_u:   f32,
+    center_v:   f32,
+    rect_min_x: f32, rect_min_y: f32,
+    rect_max_x: f32, rect_max_y: f32,
+    overlay_alpha: f32,
+    ppp:        f32,
+    fade_alpha: f32,
+    _pad2:      vec3<f32>,
+};
+
+@group(0) @binding(0) var samp: sampler;
+@group(0) @binding(1) var texA: texture_2d<f32>;
+@group(0) @binding(2) var texB: texture_2d<f32>;
+@group(0) @binding(3) var<uniform> P: Params;
+
+struct VSOut { @builtin(position) pos: vec4<f32>,};
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VSOut {
+    var positions = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 3.0, -1.0),
+        vec2<f32>(-1.0,  3.0),
+    );
+    var o: VSOut; o.pos = vec4<f32>(positions[vid], 0.0, 1.0); return o;
+}
+
+fn clamp01(v: vec3<f32>) -> vec3<f32> { return clamp(v, vec3<f32>(0.0), vec3<f32>(1.0)); }
+fn apply_bcs_gamma(rgb: vec3<f32>) -> vec3<f32> {
+    var c = rgb + vec3<f32>(P.brightness);
+    c = (c - vec3<f32>(0.5)) * vec3<f32>(P.contrast) + vec3<f32>(0.5);
+    let l = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+    c = mix(vec3<f32>(l), c, vec3<f32>(P.saturation));
+    c = clamp01(c);
+    c = pow(c, vec3<f32>(max(P.gamma, 1e-6)));
+    return clamp01(c);
+}
+
+// petite palette (magma-like) compacte
+fn colormap(v: f32) -> vec3<f32> {
+    let x = clamp(v, 0.0, 1.0);
+    // palette simple: noir -> violet -> orange -> jaune
+    let r = clamp( 1.5*x - 0.1, 0.0, 1.0 );
+    let g = clamp( 1.5*x - 0.6, 0.0, 1.0 );
+    let b = clamp( 1.5*(1.0 - x), 0.0, 1.0 );
+    return vec3<f32>(r, g, b);
+}
+
+@fragment
+fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
+    // === identique à DIFF pour le mapping UV ===
+    let fx = frag_pos.x / P.ppp;
+    let fy = frag_pos.y / P.ppp;
+    let rx = fx - P.rect_min_x; let ry = fy - P.rect_min_y;
+    let rw = max(P.rect_max_x - P.rect_min_x, 1e-6);
+    let rh = max(P.rect_max_y - P.rect_min_y, 1e-6);
+    var tw: f32; var th: f32;
+    if (P.rotation == 90u || P.rotation == 270u) { tw = max(P.tex_h*P.zoom,1e-6); th = max(P.tex_w*P.zoom,1e-6); }
+    else { tw = max(P.tex_w*P.zoom,1e-6); th = max(P.tex_h*P.zoom,1e-6); }
+    var u: f32; var v: f32;
+    if (P.center_u >= 0.0) {
+        let cx = rw*0.5 + P.off_x; let cy = rh*0.5 + P.off_y;
+        let tlx = cx - P.center_u*tw; let tly = cy - P.center_v*th;
+        u = (rx - tlx)/tw; v = (ry - tly)/th;
+    } else {
+        u = (rx - P.off_x)/tw; v = (ry - P.off_y)/th;
+    }
+    if (P.flip_h == 1u) { u = 1.0 - u; }
+    if (P.flip_v == 1u) { v = 1.0 - v; }
+    var uu = u; var vv = v;
+    if (P.rotation == 90u) { let t = uu; uu = vv; vv = 1.0 - t; }
+    else if (P.rotation == 180u) { uu = 1.0 - uu; vv = 1.0 - vv; }
+    else if (P.rotation == 270u) { let t = uu; uu = 1.0 - vv; vv = t; }
+    let inside = (uu>=0.0)&&(uu<=1.0)&&(vv>=0.0)&&(vv<=1.0);
+    if (!inside) { return vec4<f32>(0.0,0.0,0.0,0.0); }
+    let U = clamp(uu,0.0,1.0); let V = clamp(vv,0.0,1.0);
+
+    // === Diff & heatmap ===
+    let a = textureSample(texA, samp, vec2<f32>(U, V)).rgb;
+    let b = textureSample(texB, samp, vec2<f32>(U, V)).rgb;
+    let d = abs(a - b);
+
+    // magnitude (luminance) + gain (overlay_alpha = gain)
+    let gain = max(P.overlay_alpha, 1.0);
+    let mag = clamp(gain * dot(d, vec3<f32>(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+
+    var col = colormap(mag);
+    col = apply_bcs_gamma(col);
+    return vec4<f32>(col, 1.0) * P.fade_alpha;
+}
+"#;
+
 
 // Ressources GPU par draw (créées en prepare, utilisées en paint)
 struct GpuStuff {
@@ -1676,6 +1779,13 @@ impl PostProcessCbDiff {
             gpu: Mutex::new(None),
         }
     }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum DiffVis {
+    Gray,     // niveaux de gris : continu (seuil=0) ou binaire (seuil>0)
+    Color,    // |A-B| par canal (R,G,B)
+    Heatmap,  // |A-B| mappé en palette avec un gain
 }
 
 impl egui_wgpu::CallbackTrait for PostProcessCbDiff {
@@ -1853,6 +1963,208 @@ impl egui_wgpu::CallbackTrait for PostProcessCbDiff {
         }
     }
 }
+
+struct PostProcessCbDiffHeatmap {
+    pixels_a: Arc<Vec<u8>>,
+    size_a: [u32; 2],
+    pixels_b: Arc<Vec<u8>>,
+    size_b: [u32; 2],
+    params: GpuParams,
+    linear: bool,
+    gpu: Mutex<Option<GpuStuff2>>,
+}
+
+impl PostProcessCbDiffHeatmap {
+    fn new(pa: Arc<Vec<u8>>, sa: [usize; 2], pb: Arc<Vec<u8>>, sb: [usize; 2], params: GpuParams, linear: bool) -> Self {
+        Self {
+            pixels_a: pa,
+            size_a: [sa[0] as u32, sa[1] as u32],
+            pixels_b: pb,
+            size_b: [sb[0] as u32, sb[1] as u32],
+            params,
+            linear,
+            gpu: Mutex::new(None),
+        }
+    }
+}
+
+impl egui_wgpu::CallbackTrait for PostProcessCbDiffHeatmap {
+    fn prepare(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        screen_desc: &egui_wgpu::ScreenDescriptor,
+        _encoder: &mut wgpu::CommandEncoder,
+        _resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        let mut guard = self.gpu.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
+            // textures A et B
+            let make_tex = |size: [u32;2]| -> wgpu::Texture {
+                device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("uv_diff_tex"),
+                    size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm, // non-sRGB
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                })
+            };
+            let tex_a = make_tex(self.size_a);
+            let tex_b = make_tex(self.size_b);
+
+            // upload
+            queue.write_texture(
+                wgpu::ImageCopyTexture { texture: &tex_a, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                &self.pixels_a,
+                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * self.size_a[0]), rows_per_image: Some(self.size_a[1]) },
+                wgpu::Extent3d { width: self.size_a[0], height: self.size_a[1], depth_or_array_layers: 1 },
+            );
+            queue.write_texture(
+                wgpu::ImageCopyTexture { texture: &tex_b, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                &self.pixels_b,
+                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * self.size_b[0]), rows_per_image: Some(self.size_b[1]) },
+                wgpu::Extent3d { width: self.size_b[0], height: self.size_b[1], depth_or_array_layers: 1 },
+            );
+
+            let view_a = tex_a.create_view(&wgpu::TextureViewDescriptor::default());
+            let view_b = tex_b.create_view(&wgpu::TextureViewDescriptor::default());
+
+            let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("uv_sampler_diff"),
+                mag_filter: if self.linear { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest },
+                min_filter: if self.linear { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest },
+                mipmap_filter: wgpu::FilterMode::Nearest,
+                ..Default::default()
+            });
+
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("post_shader_diff"),
+                source: wgpu::ShaderSource::Wgsl(POST_WGSL_DIFF_HEATMAP.into()),
+            });
+
+            // BGL: samp, texA, texB, UBO
+            let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("post_bgl_diff"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: std::num::NonZeroU64::new(std::mem::size_of::<GpuParams>() as u64),
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+            let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("post_pl_diff"),
+                bind_group_layouts: &[&bgl],
+                push_constant_ranges: &[],
+            });
+
+            let target_format = wgpu::TextureFormat::Bgra8Unorm; // doit matcher egui
+            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("post_pipeline_diff"),
+                layout: Some(&pl),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: "vs_main",
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: "fs_main",
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target_format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+
+            let ubo = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("post_ubo_diff"),
+                size: std::mem::size_of::<GpuParams>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("post_bind_diff"),
+                layout: &bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Sampler(&sampler) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view_a) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&view_b) },
+                    wgpu::BindGroupEntry { binding: 3, resource: ubo.as_entire_binding() },
+                ],
+            });
+
+            *guard = Some(GpuStuff2 { pipeline, bind_group: bind, ubo, _tex_a: tex_a, _tex_b: tex_b });
+        }
+
+        if let Some(gpu) = guard.as_ref() {
+            let mut p = self.params;
+            p.ppp = screen_desc.pixels_per_point;
+            queue.write_buffer(&gpu.ubo, 0, bytemuck::bytes_of(&p));
+        }
+        Vec::new()
+    }
+
+    fn paint(&self, info: egui::PaintCallbackInfo, rpass: &mut wgpu::RenderPass<'static>, _resources: &egui_wgpu::CallbackResources) {
+        if let Some(gpu) = self.gpu.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            let Some((left, top, width, height)) = scissor_from_info(&info) else {
+                return; // hors viewport ou zone nulle
+            };
+            rpass.set_scissor_rect(left, top, width, height);
+
+            rpass.set_pipeline(&gpu.pipeline);
+            rpass.set_bind_group(0, &gpu.bind_group, &[]);
+            rpass.draw(0..3, 0..1);
+        }
+    }
+}
+
+
 
 struct PostProcessCbOverlay {
     pixels_a: Arc<Vec<u8>>,
@@ -2516,6 +2828,21 @@ fn make_postprocess_paint_callback_diff(
         WgpuCallback::new_paint_callback(rect, cb)
 }
 
+fn make_postprocess_paint_callback_diff_heatmap(
+    rect: egui::Rect,
+    px_a: Arc<Vec<u8>>, size_a: [usize; 2],
+    px_b: Arc<Vec<u8>>, size_b: [usize; 2],
+    linear: bool,
+    mut params: GpuParams,
+    ) -> egui::PaintCallback {
+        params.rect_min_x = rect.min.x;
+        params.rect_min_y = rect.min.y;
+        params.rect_max_x = rect.max.x;
+        params.rect_max_y = rect.max.y;
+        let cb = PostProcessCbDiffHeatmap::new(px_a, size_a, px_b, size_b, params, linear);
+        WgpuCallback::new_paint_callback(rect, cb)
+}
+
 fn make_postprocess_paint_callback_overlay(
     rect: egui::Rect,
     px_a: Arc<Vec<u8>>, size_a: [usize; 2],
@@ -2681,6 +3008,9 @@ struct App {
     show_split_divider: bool,
 
     diff_threshold : f32,
+    diff_gain: f32,      // gain d’amplification pour heatmap
+    diff_vis: DiffVis,
+
     checker_tile_px : f32,
 
     // États de vue individuels (utilisés si link_views == false)
@@ -2822,6 +3152,8 @@ impl Default for App {
 
             checker_tile_px: 26.0,
             diff_threshold: 0.0,
+            diff_gain: 1.0,      // gain neutre
+            diff_vis: DiffVis::Color,
 
             zoom_a: 1.0,
             zoom_b: 1.0,
@@ -3935,7 +4267,27 @@ impl eframe::App for App {
                                 self.request_center = true;
                                 ui.ctx().request_repaint();
                             }
-                            ui.add(egui::Slider::new(&mut self.diff_threshold, 0.0..=1.0).text("Seuil Δ"));
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(&mut self.diff_vis, DiffVis::Color, "Color");
+                                ui.selectable_value(&mut self.diff_vis, DiffVis::Gray, "Gray");                             
+                                ui.selectable_value(&mut self.diff_vis, DiffVis::Heatmap, "Heatmap");
+                            });
+
+                            match self.diff_vis {
+                                DiffVis::Gray => {
+                                    ui.add(egui::Slider::new(&mut self.diff_threshold, 0.0..=1.0).text("Threshold Δ"));
+                                    ui.label("0 = Linear, >0 = binary");
+                                }
+                                DiffVis::Color => {
+                                    ui.label("(|A−B| RGB)");
+                                }
+                                DiffVis::Heatmap => {
+                                    ui.add(egui::Slider::new(&mut self.diff_gain, 1.0..=10.0).text("Gain"));
+                                }
+                            }
+                            
+
+
                         }
                         CompareMode::Overlay => {
                              ui.add(egui::Slider::new(&mut self.overlay_alpha, 0.0..=1.0)
@@ -4893,16 +5245,50 @@ impl eframe::App for App {
                             p.rect_max_x = panel_rect.max.x; 
                             p.rect_max_y = panel_rect.max.y;
                             
-                            p.overlay_alpha = self.diff_threshold;
+                            match self.diff_vis {
+                                DiffVis::Gray => {
+                                    // Shader Diff classique (gris)
+                                    // Convention : overlay_alpha = seuil ; 0 => continu ; >0 => binaire
+                                    p.overlay_alpha = self.diff_threshold.max(0.0);
+                                    let cb = make_postprocess_paint_callback_diff(
+                                        panel_rect,
+                                        Arc::clone(pa), self.size_a,
+                                        Arc::clone(pb), self.size_b,
+                                        self.linear_filter,
+                                        p,
+                                    );
+                                    ui.painter().add(cb);
+                                }
 
-                            let cb = make_postprocess_paint_callback_diff(
-                                panel_rect,
-                                Arc::clone(pa), self.size_a,
-                                Arc::clone(pb), self.size_b,
-                                self.linear_filter,
-                                p,
-                            );
-                            ui.painter().add(cb);
+                                DiffVis::Color => {
+                                    // Shader Diff classique, mais on passe un "sentinel" négatif pour déclencher la variante couleur
+                                    // (le WGSL teste t<0 → diff couleur)
+                                    p.overlay_alpha = -1.0;
+                                    let cb = make_postprocess_paint_callback_diff(
+                                        panel_rect,
+                                        Arc::clone(pa), self.size_a,
+                                        Arc::clone(pb), self.size_b,
+                                        self.linear_filter,
+                                        p,
+                                    );
+                                    ui.painter().add(cb);
+                                }
+
+                                DiffVis::Heatmap => {
+                                    // Shader Diff heatmap (pipeline dédié)
+                                    // Convention : overlay_alpha = gain (>=1)
+                                    p.overlay_alpha = self.diff_gain.max(1.0);
+                                    let cb = make_postprocess_paint_callback_diff_heatmap(
+                                        panel_rect,
+                                        Arc::clone(pa), self.size_a,
+                                        Arc::clone(pb), self.size_b,
+                                        self.linear_filter,
+                                        p,
+                                    );
+                                    ui.painter().add(cb);
+                                }
+                            }
+
                         }
                     }
                     CompareMode::Overlay => {
