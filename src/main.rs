@@ -5,11 +5,9 @@
 use egui::{IconData, RichText};
 use bytemuck::{Pod, Zeroable};
 use eframe::{
-    egui,
-    egui::{Pos2, Rect, Sense, UiBuilder, Vec2},
-    egui_wgpu,
+    egui::{self, Pos2, Rect, Sense, UiBuilder, Vec2, Context},
+    egui_wgpu::{self, Callback as WgpuCallback, wgpu},
 };
-use eframe::egui_wgpu::{Callback as WgpuCallback, wgpu};
 use rfd::FileDialog;
 use std::{
     fs,
@@ -3796,10 +3794,44 @@ impl App {
         });
     }
 
+    fn handle_dropped_file(&mut self, ctx: &Context, path: PathBuf) {
+        match (self.orig_a.is_some(), self.orig_b.is_some()) {
+            (false, _) => {
+                let _ = self.load_image_a(ctx, path);
+            }
+            (true, false) => {
+                let _ = self.load_image_b(ctx, path);
+                self.compare_enabled = true;
+                self.request_fit = true;
+            }
+            (true, true) => {
+                let _ = self.load_image_a(ctx, path);
+            }
+        }
+    }
 }
 
 impl eframe::App for App {
+    
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+
+         // --- drag & drop support ---
+        ctx.input(|i| {
+            // fichiers déposés
+            for file in &i.raw.dropped_files {
+                if let Some(path) = &file.path {
+                    self.handle_dropped_file(ctx, path.clone());
+                }
+            }
+
+            // fichiers survolés
+            for file in &i.raw.hovered_files {
+                if let Some(path) = &file.path {
+                    let _ = path;
+                }
+            }
+        });
 
         let now = Instant::now();
 
@@ -5467,7 +5499,8 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_title("Visua")
             .with_inner_size(egui::vec2(1440.0, 820.0))
-            .with_min_inner_size(egui::vec2(1440.0, 820.0))       
+            .with_min_inner_size(egui::vec2(1440.0, 820.0))
+            .with_drag_and_drop(true)     
             .with_icon(icon),
         centered: true, // centrer à l’ouverture
         ..Default::default()
