@@ -5,7 +5,7 @@
 use egui::{IconData, RichText};
 use bytemuck::{Pod, Zeroable};
 use eframe::{
-    egui::{self, Pos2, Rect, Sense, UiBuilder, Vec2, Context},
+    egui::{self, Pos2, Rect, Sense, UiBuilder, Vec2},
     egui_wgpu::{self, Callback as WgpuCallback, wgpu},
 };
 use rfd::FileDialog;
@@ -2901,6 +2901,10 @@ struct App {
     size_b: [usize; 2],
     tex_b_cpu: Option<egui::TextureHandle>,
 
+    // Logique Drag n drop
+    last_loaded_a: Option<std::time::Instant>,
+    last_loaded_b: Option<std::time::Instant>,
+
      // --- Async loader ---
     loader: Loader,
     next_req_id: u64,
@@ -3070,6 +3074,9 @@ impl Default for App {
             last_req_b: None,
             inflight_a : false,
             inflight_b : false,
+
+            last_loaded_a: None,
+            last_loaded_b: None,
             
             pending_free: Vec::new(),
 
@@ -3310,7 +3317,6 @@ impl App {
 
         // 4) Charger la nouvelle “courante” via le WRAPPER qui réaligne filelist_a + idx_a
         if let Some(n) = next {
-            // ⬅️ CHANGEMENT MAJEUR: utiliser load_image_a (et non load_image_a_only)
             self.load_image_a(ctx, n)?;
         } else {
             // plus d’image dans le dossier → état propre
@@ -3555,6 +3561,9 @@ impl App {
         let max_side = self.max_tex_side_device;
         self.request_image_a(p, max_side);
 
+        // marqueur temporel DnD
+        self.last_loaded_a = Some(std::time::Instant::now());
+
         Ok(())
     }
 
@@ -3569,7 +3578,9 @@ impl App {
        
         let max_side = self.max_tex_side_device;
         self.request_image_b(p, max_side);
-        
+
+        self.last_loaded_b = Some(std::time::Instant::now());
+
         Ok(())
         
     }
@@ -3794,7 +3805,7 @@ impl App {
         });
     }
 
-    fn handle_dropped_file(&mut self, ctx: &Context, path: PathBuf) {
+    fn handle_dropped_file(&mut self, ctx: &egui::Context, path: PathBuf) {
         match (self.orig_a.is_some(), self.orig_b.is_some()) {
             (false, _) => {
                 let _ = self.load_image_a(ctx, path);
@@ -3805,7 +3816,18 @@ impl App {
                 self.request_fit = true;
             }
             (true, true) => {
-                let _ = self.load_image_a(ctx, path);
+                // Choisir quel slot remplacer
+                let replace_a = match (self.last_loaded_a, self.last_loaded_b) {
+                    (Some(t_a), Some(t_b)) => t_a <= t_b, // si A plus ancien
+                    (Some(_), None) => true,
+                    (None, Some(_)) => false,
+                    _ => true,
+                };
+                if replace_a {
+                    let _ = self.load_image_a(ctx, path);
+                } else {
+                    let _ = self.load_image_b(ctx, path);
+                }
             }
         }
     }
@@ -3833,6 +3855,8 @@ impl eframe::App for App {
             }
         });
 
+
+        // -- gestion du fading --
         let now = Instant::now();
 
         let fade_duration = if self.slideshow_mode {
