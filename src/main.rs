@@ -1,11 +1,10 @@
-#![windows_subsystem = "windows"]
 #![allow(dead_code)]
 
 // uses
 use egui::{IconData, RichText};
 use bytemuck::{Pod, Zeroable};
 use eframe::{
-    egui::{self, Pos2, Rect, Sense, UiBuilder, Vec2},
+    egui::{self, Pos2, Rect, Sense, UiBuilder, Vec2, Color32, Stroke},
     egui_wgpu::{self, Callback as WgpuCallback, wgpu},
 };
 use rfd::FileDialog;
@@ -23,6 +22,47 @@ use std::{
 use num_cpus;
 use exif;
 
+
+// ================ THEME =================
+
+fn visua_dark_visuals() -> egui::Visuals {
+    let mut v = egui::Visuals::dark();
+    v.panel_fill = Color32::from_rgb(25, 25, 25);
+    v.window_fill = Color32::from_rgb(20, 20, 20);
+    v.extreme_bg_color = Color32::from_rgb(15, 15, 15);
+    v.faint_bg_color = Color32::from_rgb(35, 35, 35);
+    v.window_stroke = Stroke::new(1.0, Color32::from_rgb(70, 70, 70));
+    v.selection.bg_fill = Color32::from_rgb(191, 44, 18);
+    v.selection.stroke = Stroke::new(1.0, Color32::from_rgb(200, 200, 255));   
+    v.widgets.noninteractive.bg_fill = Color32::from_rgb(30, 30, 30);
+    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(200, 200, 200));
+    v.widgets.noninteractive.rounding = egui::Rounding::same(4.0);
+    v.widgets.noninteractive.expansion = 0.0;
+    v.widgets.hovered.bg_fill = Color32::from_rgb(50, 50, 50);
+    v.widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::from_rgb(240, 240, 240));
+    v.widgets.hovered.rounding = egui::Rounding::same(4.0);
+    v.widgets.hovered.expansion = 0.0;
+    v.widgets.active.bg_fill = Color32::from_rgb(70, 70, 70);
+    v.widgets.active.fg_stroke = Stroke::new(1.0, Color32::from_rgb(255, 255, 255));
+    v.widgets.active.rounding = egui::Rounding::same(4.0);
+    v.widgets.active.expansion = 0.0;
+    v
+}
+
+fn visua_dark_style(ctx: &egui::Context) -> egui::Style {
+    let mut s = (*ctx.style()).clone();
+
+    // Renforce la lisibilité
+    // if let Some(f) = s.text_styles.get_mut(&egui::TextStyle::Body) { f.size = 14.0; }
+    // if let Some(f) = s.text_styles.get_mut(&egui::TextStyle::Button) { f.size = 14.0; }
+    // if let Some(f) = s.text_styles.get_mut(&egui::TextStyle::Heading){ f.size = 16.0; }
+
+    // S’assure d’utiliser nos visuels
+    s.visuals = visua_dark_visuals();
+    s
+}
+
+// ================ PANIC HOOK =================
 fn install_panic_hook_once() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -5550,7 +5590,8 @@ fn main() -> eframe::Result<()> {
                     let _ = app.load_image_a(&cc.egui_ctx, p.clone());
                 }
             }
-
+            cc.egui_ctx.set_visuals(visua_dark_visuals());
+            cc.egui_ctx.set_style(visua_dark_style(&cc.egui_ctx));
             Ok(Box::new(app))
         }),
     )
