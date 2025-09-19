@@ -33,7 +33,7 @@ fn visua_dark_visuals() -> egui::Visuals {
     v.faint_bg_color = Color32::from_rgb(35, 35, 35);
     v.window_stroke = Stroke::new(1.0, Color32::from_rgb(70, 70, 70));
     v.selection.bg_fill = Color32::from_rgb(191, 44, 18);
-    v.selection.stroke = Stroke::new(1.0, Color32::from_rgb(200, 200, 255));   
+    v.selection.stroke = Stroke::new(1.0, Color32::from_rgb(255, 255, 255));   
     v.widgets.noninteractive.bg_fill = Color32::from_rgb(30, 30, 30);
     v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(200, 200, 200));
     v.widgets.noninteractive.rounding = egui::Rounding::same(4.0);
