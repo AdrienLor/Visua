@@ -31,34 +31,6 @@
 
 ---
 
-## What’s new (v1.5.0)
-
-- **New comparison modes**:  
-  - **Checkerboard** with adjustable tile size.  
-  - Extended **Diff** with three visualization modes:  
-    - Gray (continuous or thresholded).  
-    - Color (per-channel differences).  
-    - Heatmap (false-color map with adjustable gain).  
-- **UI improvements**:  
-  - Unified, mutually exclusive selector for Diff visualization modes.  
-  - Context-sensitive controls (sliders/checks only when relevant).  
-
-See the full [Changelog](CHANGELOG.md) for details.
-
----
-
-## Roadmap
-
-- Customizable keyboard shortcuts  
-- Extended TIFF support (compression, metadata)  
-- ICC color profile handling  
-- ROI selection with quantitative metrics (MAE, PSNR, % above threshold)  
-- Export current view (with adjustments and comparison mode applied)  
-- Annotation and measurement tools  
-- Performance optimizations for very large images  
-
----
-
 ## 📦 Build
 
 ```bash
