@@ -18,6 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - …
 
+---
+## v1.5.1 (2025-09-19)
+
+### New
+- **UI improvements**
+  - Drag n drop implementation
+  - Cosmetic UI modifications
+    
+---
+
 ## v1.5.0 (2025-09-07)
 
 ### New
